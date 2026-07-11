@@ -8,3 +8,13 @@ body,
   height: 100%;
   margin: 0;
 }
+
+/* Handwriting canvas — kill inherited paragraph spacing that breaks rule alignment */
+[data-a4-page] p,
+[data-a4-page] h1,
+[data-a4-page] h2,
+[data-a4-page] h3 {
+  margin: 0;
+  padding: 0;
+}
+

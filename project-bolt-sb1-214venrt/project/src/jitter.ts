@@ -1,11 +1,32 @@
-// Deterministic hash-based jitter utilities.
-// Each character's transform is seeded by its global index in the full text,
-// so adding/removing text at the end never shifts earlier characters.
+// Deterministic hash-based micro-variance engine.
+// Each glyph's transform is seeded by its global index so editing the end
+// of the assignment never shifts earlier characters.
 
 export type CharJitter = {
-  translateY: number; // -0.5px to +0.5px
-  marginRight: number; // -0.8px to +1.2px (slight tracking inconsistency)
-  rotate: number; // -1.5deg to +1.5deg
+  /** Baseline wobble (px) — letters leave the perfect pixel grid. */
+  translateY: number;
+  /** Tracking / word-gap slack (px). */
+  marginRight: number;
+  /** Per-character slant noise + matched bias (deg). */
+  rotate: number;
+};
+
+/**
+ * Image-influenced intensity knobs from Match My Writing Style.
+ * Higher photo noise → stronger layout chaos in the live preview.
+ */
+export type JitterIntensity = {
+  /** 0–1 paper/ink grain from styleExtractor / archetype baselineJitter. */
+  noiseIntensity?: number;
+  /** Baseline slant degrees extracted from the notebook photo. */
+  slantBiasDegrees?: number;
+  /** True for space glyphs that sit between words. */
+  isWordGap?: boolean;
+  /**
+   * Extra multiplier on vertical baseline wobble (archetype baselineJitter).
+   * Defaults to 1; values ~0.2–1.2 scale ±px offsets.
+   */
+  baselineJitterScale?: number;
 };
 
 /**
@@ -40,29 +61,79 @@ function mulberry32(a: number): () => number {
   };
 }
 
-// Cache: globalCharIndex -> CharJitter. Prevents recompute on every render.
-const jitterCache = new Map<number, CharJitter>();
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Cache key includes intensity so matched-style changes recompute cleanly. */
+function cacheKey(
+  globalIndex: number,
+  noise: number,
+  slant: number,
+  isWordGap: boolean,
+  baselineScale: number,
+): string {
+  return `${globalIndex}|n${noise.toFixed(3)}|s${slant.toFixed(2)}|g${isWordGap ? 1 : 0}|b${baselineScale.toFixed(2)}`;
+}
+
+const jitterCache = new Map<string, CharJitter>();
 
 /**
- * Returns deterministic jitter values for a character at the given global index.
- * The same index always produces the same jitter, regardless of what text
- * surrounds it — so existing characters never shift when new text is appended.
+ * Micro-variance for one character in the A4 drawing loop.
+ *
+ * Three image-influenced channels:
+ * 1. Baseline jitter — vertical offset up to ~±1.5px (scales with noise)
+ * 2. Character slant noise — micro-rotation + matched slant bias
+ * 3. Word spacing slack — extra gap on inter-word spaces
  */
-export function getCharJitter(globalIndex: number): CharJitter {
-  const cached = jitterCache.get(globalIndex);
+export function getCharJitter(
+  globalIndex: number,
+  intensity: JitterIntensity = {},
+): CharJitter {
+  const noise = clamp(intensity.noiseIntensity ?? 0, 0, 1);
+  const slantBias = intensity.slantBiasDegrees ?? 0;
+  const isWordGap = Boolean(intensity.isWordGap);
+  const baselineScale = clamp(intensity.baselineJitterScale ?? 1, 0.15, 1.5);
+
+  const key = cacheKey(globalIndex, noise, slantBias, isWordGap, baselineScale);
+  const cached = jitterCache.get(key);
   if (cached) return cached;
 
-  // Seed the PRNG from the global index
   const seedFn = xmur3(`char-${globalIndex}`);
-  const seed = seedFn();
-  const rand = mulberry32(seed);
+  const rand = mulberry32(seedFn());
 
-  const jitter: CharJitter = {
-    translateY: (rand() - 0.5) * 1.0, // -0.5 to +0.5
-    marginRight: rand() * 2.0 - 0.8, // -0.8 to +1.2
-    rotate: (rand() - 0.5) * 3.0, // -1.5 to +1.5
+  // Image-driven chaos: noiseIntensity from styleExtractor scales all three
+  // micro-variance channels (baseline, slant noise, word-gap slack).
+  // Floor keeps mild human variance; matched grain pushes toward full band.
+  const chaos = 0.22 + noise * 0.78;
+
+  // 1) Baseline jitter — leave the perfect pixel grid (±px scaled by noise + archetype)
+  const baselineAmp = 1.5 * chaos * baselineScale;
+  const translateY = (rand() - 0.5) * 2 * baselineAmp;
+
+  // 2) Character slant noise — micro-rotation matrix shift per glyph
+  const slantNoiseAmp = 1.1 + chaos * 2.4; // ~±1.1° … ±3.5°
+  const rotate = (rand() - 0.5) * 2 * slantNoiseAmp + slantBias;
+
+  // 3) Tracking + word-spacing slack
+  let marginRight = (rand() - 0.35) * (0.55 + chaos * 0.9); // letter tracking
+  if (isWordGap) {
+    // Human cadence: irregular gaps between words (tight fraction of an em)
+    const slack = (rand() - 0.25) * (1.2 + chaos * 2.8);
+    marginRight += slack;
+  }
+
+  const result: CharJitter = {
+    translateY: Math.round(translateY * 100) / 100,
+    marginRight: Math.round(marginRight * 100) / 100,
+    rotate: Math.round(rotate * 100) / 100,
   };
 
-  jitterCache.set(globalIndex, jitter);
-  return jitter;
+  jitterCache.set(key, result);
+  return result;
+}
+
+/** Drop cached transforms (e.g. after a new Match My Style photo). */
+export function clearJitterCache(): void {
+  jitterCache.clear();
 }

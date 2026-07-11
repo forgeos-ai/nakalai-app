@@ -8,12 +8,16 @@ type CharRendererProps = {
   color: string;
   fontStyle: FontStyle;
   fontSizePx: number;
+  /** Baseline slant from Match My Writing Style (degrees). */
+  slantBiasDegrees?: number;
+  /** 0–1 photo grain — scales baseline / slant / word-gap chaos. */
+  noiseIntensity?: number;
 };
 
 /**
- * Renders a single character as an inline-block with deterministic jitter.
- * Stays inside the native text stream so the browser handles wrapping;
- * line-height is inherited from the ruled-paper wrapper (--rule-line-height).
+ * Single glyph in the A4 drawing loop.
+ * Micro-variance (baseline, slant noise, word-gap slack) is applied per
+ * character so the live preview reads as human handwriting, not a rigid font.
  */
 function CharRendererBase({
   char,
@@ -21,22 +25,31 @@ function CharRendererBase({
   color,
   fontStyle,
   fontSizePx,
+  slantBiasDegrees = 0,
+  noiseIntensity = 0,
 }: CharRendererProps) {
-  const jitter = getCharJitter(globalIndex);
-
-  // Keep spaces visible inside inline-block without collapsing
-  const displayChar = char === ' ' ? '\u00A0' : char;
+  const isWordGap = char === ' ';
+  const jitter = getCharJitter(globalIndex, {
+    noiseIntensity,
+    slantBiasDegrees,
+    isWordGap,
+  });
+  const displayChar = isWordGap ? '\u00A0' : char;
 
   return (
     <span
       className={`inline-block ${fontStyle.className}`}
       style={{
         color,
+        fontFamily: fontStyle.fontFamily,
         fontSize: `${fontSizePx}px`,
-        lineHeight: 'inherit',
+        lineHeight: 1,
+        letterSpacing: 'inherit',
+        transformOrigin: '50% 100%',
         transform: `translateY(${jitter.translateY}px) rotate(${jitter.rotate}deg)`,
         marginRight: `${jitter.marginRight}px`,
         whiteSpace: 'pre',
+        verticalAlign: 'bottom',
       }}
     >
       {displayChar}

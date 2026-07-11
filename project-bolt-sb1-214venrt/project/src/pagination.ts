@@ -1,6 +1,6 @@
 import {
   MAX_LINES_PER_PAGE,
-  TEXT_AREA_WIDTH_PX,
+  TEXT_WRAP_WIDTH_PX,
   DEFAULT_FONT_SIZE_PX,
   LINE_SPACING_PX,
 } from './pageGeometry';
@@ -32,21 +32,11 @@ export type Page = {
 };
 
 /**
- * Slightly shrink measured width so per-character tracking jitter
- * does not overflow the CSS text area. Kept mild so pages fill fully.
- */
-const WIDTH_SAFETY_FACTOR = 0.97;
-
-/**
  * Maps a font style id to a CSS font string usable by CanvasRenderingContext2D.
  */
 function getCanvasFont(fontStyle: FontStyle, fontSizePx: number): string {
-  const familyMap: Record<string, string> = {
-    caveat: 'Caveat',
-    kalam: 'Kalam',
-    architects: "'Architects Daughter'",
-  };
-  const family = familyMap[fontStyle.id] ?? 'Caveat';
+  // Prefer explicit fontFamily from typography config (Match My Style classes)
+  const family = fontStyle.fontFamily || 'Caveat, cursive';
   return `${fontSizePx}px ${family}`;
 }
 
@@ -183,7 +173,7 @@ export function paginateText(
   text: string,
   fontStyle: FontStyle,
   fontSizePx: number = DEFAULT_FONT_SIZE_PX,
-  maxWidthPx: number = TEXT_AREA_WIDTH_PX,
+  maxWidthPx: number = TEXT_WRAP_WIDTH_PX,
   maxLinesPerPage: number = MAX_LINES_PER_PAGE,
 ): Page[] {
   if (!text || text.length === 0) {
@@ -197,7 +187,8 @@ export function paginateText(
   }
   ctx.font = getCanvasFont(fontStyle, fontSizePx);
 
-  const usableWidth = maxWidthPx * WIDTH_SAFETY_FACTOR;
+  // maxWidthPx already includes TEXT_WIDTH_SAFETY from pageGeometry
+  const usableWidth = maxWidthPx;
   const paragraphs = text.split('\n');
   const pages: Page[] = [];
   let currentSegments: PageSegment[] = [];

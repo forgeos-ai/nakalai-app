@@ -39,11 +39,15 @@ export async function exportAssignmentPdf(): Promise<void> {
       allowTaint: true,
       backgroundColor: '#ffffff',
       logging: false,
-      // Avoid capturing scroll containers / transforms incorrectly
+      // Capture the fixed A4 CSS box (same geometry as preview)
+      width: el.offsetWidth,
+      height: el.offsetHeight,
+      windowWidth: el.offsetWidth,
+      windowHeight: el.offsetHeight,
       scrollX: 0,
-      scrollY: -window.scrollY,
-      windowWidth: el.scrollWidth,
-      windowHeight: el.scrollHeight,
+      scrollY: 0,
+      x: 0,
+      y: 0,
       // Keep paid PDF pristine — skip preview watermark (and any marked nodes)
       ignoreElements: (node) =>
         node instanceof HTMLElement && node.hasAttribute('data-pdf-ignore'),

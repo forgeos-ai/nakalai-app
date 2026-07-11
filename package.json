@@ -1,0 +1,9 @@
+{
+  "name": "nalak-ai-app",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix project-bolt-sb1-214venrt/project run dev",
+    "build": "npm --prefix project-bolt-sb1-214venrt/project run build",
+    "preview": "npm --prefix project-bolt-sb1-214venrt/project run preview"
+  }
+}

@@ -5,6 +5,19 @@ export default {
     extend: {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
+        'cursive-neat': ['"Dancing Script"', 'cursive'],
+        'cursive-loop': ['Pacifico', 'cursive'],
+        'cursive-ribbon': ['"Great Vibes"', 'cursive'],
+        'messy-brush': ['Caveat', 'cursive'],
+        'scratch-wild': ['"Homemade Apple"', 'cursive'],
+        'scratch-grain': ['"Rock Salt"', 'cursive'],
+        'casual-print': ['"Architects Daughter"', 'cursive'],
+        'block-caps': ['"Special Elite"', 'cursive'],
+        'block-stencil': ['"Amatic SC"', 'cursive'],
+        'rushed-student': ['"Shadows Into Light"', 'cursive'],
+        'slant-dash': ['"Covered By Your Grace"', 'cursive'],
+        'marker-bold': ['"Permanent Marker"', 'cursive'],
+        // Legacy aliases
         caveat: ['Caveat', 'cursive'],
         kalam: ['Kalam', 'cursive'],
         architects: ['"Architects Daughter"', 'cursive'],
