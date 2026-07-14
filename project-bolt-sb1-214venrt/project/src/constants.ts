@@ -49,7 +49,8 @@ export type HandwritingFontClass =
   | 'block-stencil'
   | 'rushed-student'
   | 'slant-dash'
-  | 'marker-bold';
+  | 'marker-bold'
+  | 'matched-custom-upload';
 
 /** Structural layout knobs that scale with the chosen archetype. */
 export type ArchetypeLayoutProfile = {
@@ -217,11 +218,11 @@ export const FONT_STYLES: FontStyle[] = [
     id: 'casual-print',
     label: 'Casual Print',
     className: 'font-casual-print',
-    fontFamily: '"Architects Daughter", cursive',
+    fontFamily: '"Playpen Sans", sans-serif',
     bucket: 'printed-block-caps',
     layout: layoutFor('printed-block-caps', {
       strokeWeight: 1.35,
-      trackingEm: 0.022,
+      trackingEm: 0.05,
     }),
   },
   {
@@ -279,7 +280,153 @@ export const FONT_STYLES: FontStyle[] = [
 ];
 
 export const DEFAULT_HANDWRITING_FONT_CLASS: HandwritingFontClass =
-  'casual-print';
+  'cursive-neat';
+
+/** Sentinel id / label for Match My Style proxy profile. */
+export const MATCHED_CUSTOM_STYLE_ID = 'matched-custom-upload' as const;
+export const MATCHED_CUSTOM_STYLE_LABEL = 'Matched Custom Style Upload';
+/** High-conversion proxy face — Great Vibes ribbon cursive. */
+export const MATCHED_PROXY_FONT_ID: HandwritingFontClass = 'cursive-ribbon';
+
+export function isMatchedCustomFontStyle(style: FontStyle): boolean {
+  return (
+    style.id === MATCHED_CUSTOM_STYLE_ID ||
+    style.label === MATCHED_CUSTOM_STYLE_LABEL
+  );
+}
+
+export function toMatchedCustomFontStyle(base: FontStyle): FontStyle {
+  return {
+    ...base,
+    id: MATCHED_CUSTOM_STYLE_ID,
+    label: MATCHED_CUSTOM_STYLE_LABEL,
+  };
+}
+
+/**
+ * User-facing script vs print mode (Style tab toggle).
+ * Font families are exclusive — zero overlap between modes.
+ */
+export type HandwritingMode = 'cursive' | 'print';
+
+/** Connected cursive — Dancing Script only (all cases, no generic fallback). */
+export const CURSIVE_HANDWRITING_FONT_CLASS: HandwritingFontClass = 'cursive-neat';
+export const CURSIVE_FONT_FAMILY = 'Dancing Script';
+/** Tight tracking so script glyphs stay visually joined. */
+export const CURSIVE_TRACKING_EM = 0.008;
+
+/** Rounded disconnected hand-print — Playpen Sans (Match My Style + Split/Print). */
+export const PRINT_HANDWRITING_FONT_CLASS: HandwritingFontClass = 'casual-print';
+export const PRINT_FONT_FAMILY = 'Playpen Sans';
+/** Explicit letter-spacing for Split / Print notepad separation. */
+export const PRINT_TRACKING_EM = 0.05;
+
+/** Cursive-only faces — never mix print/block companions. */
+export const CURSIVE_FONT_VARIANTS = [
+  'Dancing Script',
+  'Great Vibes',
+  'Pacifico',
+] as const;
+
+/** Print-only faces — rounded hand-print, no serif/system fallbacks. */
+export const PRINT_FONT_VARIANTS = [
+  'Playpen Sans',
+  'Architects Daughter',
+] as const;
+
+/** Glyph sample forcing A–Z + a–z subset download (prevents uppercase block fallback). */
+export const HANDWRITING_GLYPH_SAMPLE =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,;:!?\"'-";
+
+/**
+ * Canvas `ctx.font` with ZERO generic fallbacks — named family only.
+ * Prefer this when the family comes from Match My Style image analysis.
+ */
+export function lockedCanvasFontFamily(
+  familyName: string,
+  fontSizePx: number,
+  fontWeight = 400,
+): string {
+  const bare = familyName.replace(/^["']|["']$/g, '').trim() || CURSIVE_FONT_FAMILY;
+  return `${fontWeight} ${fontSizePx}px "${bare}"`;
+}
+
+/**
+ * Canvas `ctx.font` string with ZERO generic fallbacks (legacy mode helper).
+ * Prefer lockedCanvasFontFamily with Match My Style output.
+ */
+export function lockedCanvasFont(
+  mode: HandwritingMode,
+  fontSizePx: number,
+  fontWeight = 400,
+): string {
+  return lockedCanvasFontFamily(
+    mode === 'print' ? PRINT_FONT_FAMILY : CURSIVE_FONT_FAMILY,
+    fontSizePx,
+    fontWeight,
+  );
+}
+
+/** True when analysis / registry points at disconnected print-like faces. */
+export function isDisconnectedPrintStyle(
+  fontClass: string | null | undefined,
+  fontCategory?: string | null,
+): boolean {
+  const category = (fontCategory ?? '').toLowerCase();
+  if (
+    category.includes('print') ||
+    category.includes('block') ||
+    category.includes('marker')
+  ) {
+    return true;
+  }
+  const id = fontClass ?? '';
+  return (
+    id === 'casual-print' ||
+    id === 'block-caps' ||
+    id === 'block-stencil' ||
+    id === 'marker-bold' ||
+    getFontStyleByClass(id).bucket === 'printed-block-caps' ||
+    getFontStyleByClass(id).bucket === 'heavy-gel-pen-marker'
+  );
+}
+
+/**
+ * Resolve FontStyle for pagination + canvas from mode.
+ * Mode always wins — exclusive families, no system fallbacks in the stack.
+ */
+export function resolveRenderFontStyle(
+  mode: HandwritingMode,
+  _selected?: FontStyle,
+): FontStyle {
+  if (mode === 'print') {
+    const printBase = getFontStyleByClass(PRINT_HANDWRITING_FONT_CLASS);
+    return {
+      ...printBase,
+      fontFamily: `"${PRINT_FONT_FAMILY}"`,
+      layout: {
+        ...printBase.layout,
+        trackingEm: PRINT_TRACKING_EM,
+        slantDegrees: 0,
+      },
+    };
+  }
+
+  const cursiveBase = getFontStyleByClass(CURSIVE_HANDWRITING_FONT_CLASS);
+  return {
+    ...cursiveBase,
+    fontFamily: `"${CURSIVE_FONT_FAMILY}"`,
+    layout: {
+      ...cursiveBase.layout,
+      trackingEm: CURSIVE_TRACKING_EM,
+    },
+  };
+}
+
+/** Exact Google Font family string for canvas — matches Style tab labels. */
+export function fontFamilyForHandwritingMode(mode: HandwritingMode): string {
+  return mode === 'print' ? PRINT_FONT_FAMILY : CURSIVE_FONT_FAMILY;
+}
 
 export function getFontStyleByClass(
   fontClass: HandwritingFontClass | string | null | undefined,

@@ -1,11 +1,11 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { InkColor, FontStyle, PaperType } from '../constants';
+import { isDisconnectedPrintStyle } from '../constants';
 import type { PageSegment } from '../pagination';
 import type { MatchedStyleOverrides } from '../pageGeometry';
 import PreviewWatermark from './PreviewWatermark';
 import VectorHandwritingCanvas from './VectorHandwritingCanvas';
 import { useStrokeLayoutMetrics } from '../utils/useStrokeLayoutMetrics';
-import { googleFontNameForClass } from '../utils/styleExtractor';
 import {
   A4_WIDTH_PX,
   A4_HEIGHT_PX,
@@ -24,10 +24,15 @@ type A4PageProps = {
   inkColor: InkColor;
   paperType: PaperType;
   fontStyle: FontStyle;
+  /** Exact Google Font from Match My Style image analysis. */
+  matchedFontFamily: string;
   fontSizePx?: number;
   isPaid?: boolean;
   matchedStyle?: MatchedStyleOverrides | null;
   layoutRevision?: number;
+  paintRevision?: number;
+  /** Mobile — page fills container width; inner layout uses relative units. */
+  fluidWidth?: boolean;
 };
 
 /**
@@ -40,11 +45,32 @@ export default function A4Page({
   inkColor,
   paperType,
   fontStyle,
+  matchedFontFamily,
   fontSizePx = DEFAULT_FONT_SIZE_PX,
   isPaid = false,
   matchedStyle = null,
   layoutRevision = 0,
+  paintRevision = 0,
+  fluidWidth = false,
 }: A4PageProps) {
+  const pageRef = useRef<HTMLDivElement>(null);
+  const [fluidPageWidth, setFluidPageWidth] = useState(A4_WIDTH_PX);
+
+  useEffect(() => {
+    if (!fluidWidth || !pageRef.current) return;
+    const node = pageRef.current;
+    const sync = (w: number) => {
+      if (w > 0) setFluidPageWidth(w);
+    };
+    sync(node.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      const box = entries[0]?.contentRect;
+      if (box) sync(box.width);
+    });
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [fluidWidth]);
+
   const layout = useStrokeLayoutMetrics(
     matchedStyle,
     layoutRevision,
@@ -68,33 +94,97 @@ export default function A4Page({
     paperType.id === 'ruled' ||
     paperType.label === 'Ruled Notebook';
 
-  const pageStyle = {
-    width: `${A4_WIDTH_PX}px`,
-    height: `${A4_HEIGHT_PX}px`,
-    flexShrink: 0,
-    ['--rule-line-height' as string]: `${ruleLineHeight}px`,
-    ['--handwriting-size' as string]: `${fontSizePx}px`,
-    ['--handwriting-tracking' as string]: `${layout.trackingEm}em`,
-    ['--handwriting-font' as string]: fontStyle.fontFamily,
-    ['--matched-slant' as string]: `${slantBias}deg`,
-    ['--paper-noise' as string]: String(noise),
-    ['--stroke-weight' as string]: String(layout.strokeWeight),
-    ['--baseline-jitter' as string]: String(layout.baselineJitter),
-    ['--margin-scale' as string]: String(layout.marginScale),
-  } as CSSProperties;
+  /**
+   * Fluid pages shrink via CSS width/aspect-ratio. Rule overlays must use
+   * container-scaled *pixel* metrics — gradient color-stop % relative to a
+   * percentage tile dissolves lines on mobile WebKit.
+   */
+  const fluidScale = fluidWidth
+    ? Math.max(0.01, fluidPageWidth / A4_WIDTH_PX)
+    : 1;
+  const scaledRulePx = ruleLineHeight * fluidScale;
+  const scaledPadTopPx = PADDING_TOP_PX * fluidScale;
+  const scaledMarginLeftPx = MARGIN_LEFT_PX * fluidScale;
+
+  const pageStyle = fluidWidth
+    ? ({
+        width: '100%',
+        maxWidth: '100%',
+        height: 'auto',
+        aspectRatio: `${A4_WIDTH_PX} / ${A4_HEIGHT_PX}`,
+        flexShrink: 0,
+        ['--rule-line-height' as string]: `${scaledRulePx}px`,
+        ['--handwriting-size' as string]: `${fontSizePx}px`,
+        ['--handwriting-tracking' as string]: `${layout.trackingEm}em`,
+        ['--handwriting-font' as string]: fontStyle.fontFamily,
+        ['--matched-slant' as string]: `${slantBias}deg`,
+        ['--paper-noise' as string]: String(noise),
+        ['--stroke-weight' as string]: String(layout.strokeWeight),
+        ['--baseline-jitter' as string]: String(layout.baselineJitter),
+        ['--margin-scale' as string]: String(layout.marginScale),
+      } as CSSProperties)
+    : ({
+        width: `${A4_WIDTH_PX}px`,
+        height: `${A4_HEIGHT_PX}px`,
+        flexShrink: 0,
+        ['--rule-line-height' as string]: `${ruleLineHeight}px`,
+        ['--handwriting-size' as string]: `${fontSizePx}px`,
+        ['--handwriting-tracking' as string]: `${layout.trackingEm}em`,
+        ['--handwriting-font' as string]: fontStyle.fontFamily,
+        ['--matched-slant' as string]: `${slantBias}deg`,
+        ['--paper-noise' as string]: String(noise),
+        ['--stroke-weight' as string]: String(layout.strokeWeight),
+        ['--baseline-jitter' as string]: String(layout.baselineJitter),
+        ['--margin-scale' as string]: String(layout.marginScale),
+      } as CSSProperties);
+
+  const textSurfaceStyle: CSSProperties = fluidWidth
+    ? {
+        left: `${(textLeft / A4_WIDTH_PX) * 100}%`,
+        top: `${(PADDING_TOP_PX / A4_HEIGHT_PX) * 100}%`,
+        width: `${(textWidth / A4_WIDTH_PX) * 100}%`,
+        height: `${(textAreaHeightPx / A4_HEIGHT_PX) * 100}%`,
+        margin: 0,
+        padding: 0,
+        textTransform: 'none',
+        fontVariant: 'normal',
+        fontFamily: isDisconnectedPrintStyle(
+          matchedStyle?.fontClass ?? fontStyle.id,
+          matchedStyle?.fontCategory,
+        )
+          ? "'Playpen Sans'"
+          : "'Dancing Script'",
+      }
+    : {
+        left: `${textLeft}px`,
+        top: `${PADDING_TOP_PX}px`,
+        width: `${textWidth}px`,
+        height: `${textAreaHeightPx}px`,
+        margin: 0,
+        padding: 0,
+        textTransform: 'none',
+        fontVariant: 'normal',
+        fontFamily: isDisconnectedPrintStyle(
+          matchedStyle?.fontClass ?? fontStyle.id,
+          matchedStyle?.fontCategory,
+        )
+          ? "'Playpen Sans'"
+          : "'Dancing Script'",
+      };
 
   return (
     <div
+      ref={pageRef}
       data-a4-page
       data-paper-type={paperType.id}
-      className="relative bg-white shadow-paper"
+      className={`relative bg-white shadow-paper ${fluidWidth ? 'w-full max-w-full' : ''}`}
       style={pageStyle}
     >
       {showRuledLines && (
         <>
-          {/* Horizontal blue notebook rules */}
+          {/* Horizontal blue notebook rules — always use px tile metrics */}
           <div
-            className="pointer-events-none absolute inset-0"
+            className="pointer-events-none absolute inset-0 z-0"
             style={{
               backgroundImage: `linear-gradient(
                 to bottom,
@@ -102,8 +192,8 @@ export default function A4Page({
                 #a4c8f0 calc(var(--rule-line-height) - 1px),
                 #a4c8f0 var(--rule-line-height)
               )`,
-              backgroundSize: `100% ${ruleLineHeight}px`,
-              backgroundPosition: `0 ${PADDING_TOP_PX}px`,
+              backgroundSize: `100% ${fluidWidth ? scaledRulePx : ruleLineHeight}px`,
+              backgroundPosition: `0 ${fluidWidth ? scaledPadTopPx : PADDING_TOP_PX}px`,
               backgroundRepeat: 'repeat-y',
               opacity: 0.55,
             }}
@@ -112,10 +202,10 @@ export default function A4Page({
 
           {/* Pink vertical margin */}
           <div
-            className="pointer-events-none absolute top-0 bottom-0"
+            className="pointer-events-none absolute top-0 bottom-0 z-0"
             style={{
-              left: `${MARGIN_LEFT_PX}px`,
-              width: '1px',
+              left: `${fluidWidth ? scaledMarginLeftPx : MARGIN_LEFT_PX}px`,
+              width: Math.max(1, fluidScale),
               backgroundColor: '#f9a8d4',
               opacity: 0.75,
             }}
@@ -126,7 +216,7 @@ export default function A4Page({
 
       {noise > 0.02 && (
         <div
-          className="pointer-events-none absolute inset-0"
+          className="pointer-events-none absolute inset-0 z-0"
           style={{
             opacity: Math.min(0.35, noise * 0.9),
             mixBlendMode: 'multiply',
@@ -142,29 +232,30 @@ export default function A4Page({
       )}
 
       <div
-        className="absolute overflow-hidden"
-        style={{
-          left: `${textLeft}px`,
-          top: `${PADDING_TOP_PX}px`,
-          width: `${textWidth}px`,
-          height: `${textAreaHeightPx}px`,
-          margin: 0,
-          padding: 0,
-        }}
+        className="absolute z-[1] overflow-hidden"
+        data-handwriting-surface="true"
+        style={textSurfaceStyle}
       >
         <VectorHandwritingCanvas
-          key={googleFontNameForClass(fontStyle.id)}
+          key={`hw-${matchedFontFamily}-${paintRevision}-${layoutRevision}-${inkHex}`}
           segments={segments}
           inkHex={inkHex}
           fontStyle={fontStyle}
+          matchedFontFamily={matchedFontFamily}
           fontSizePx={fontSizePx}
+          paintRevision={paintRevision}
           layout={{
             ...layout,
-            // Photo slant only — never bleed noise into character advance
-            slantDegrees: slantBias,
+            slantDegrees: isDisconnectedPrintStyle(
+              matchedStyle?.fontClass ?? fontStyle.id,
+              matchedStyle?.fontCategory,
+            )
+              ? Math.min(Math.abs(slantBias), 2)
+              : slantBias,
           }}
           widthPx={textWidth}
           heightPx={textAreaHeightPx}
+          fillContainer={fluidWidth}
         />
       </div>
 

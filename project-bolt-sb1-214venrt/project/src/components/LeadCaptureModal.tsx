@@ -5,7 +5,11 @@ import { SOURCE_APP } from '../sourceApp';
 import { validateLeadFields, type LeadFieldErrors } from '../leadValidation';
 import { usePayment } from '../hooks/usePayment';
 import type { PaymentReceipt } from '../paymentGateway';
-import type { CheckoutQuote } from '../billing';
+import type {
+  CheckoutActivationPayload,
+  CheckoutQuote,
+} from '../billing';
+import { getPricingTierById } from '../billing';
 
 type LeadCaptureModalProps = {
   open: boolean;
@@ -16,10 +20,17 @@ type LeadCaptureModalProps = {
   sourceApp?: string;
   /** Drives ₹19 vs ₹49 quote inside initiatePremiumCheckout. */
   hasMatchedStyle?: boolean;
+  /** Selected package id — preferred over hasMatchedStyle for checkout quote. */
+  packageId?: string;
+  layoutPageCount?: number;
   /** Already unlocked — skip gateway, profile-only gate. */
   isPaid?: boolean;
   /** Fired after mock gateway + ledger upsert unlocks download. */
-  onPaymentSuccess?: (receipt: PaymentReceipt, quote: CheckoutQuote) => void;
+  onPaymentSuccess?: (
+    receipt: PaymentReceipt,
+    quote: CheckoutQuote,
+    activation?: CheckoutActivationPayload,
+  ) => void;
 };
 
 type FormErrors = LeadFieldErrors & { form?: string };
@@ -56,6 +67,8 @@ export default function LeadCaptureModal({
   onClose,
   sourceApp = SOURCE_APP,
   hasMatchedStyle = false,
+  packageId,
+  layoutPageCount = 1,
   isPaid = false,
   onPaymentSuccess,
 }: LeadCaptureModalProps) {
@@ -67,15 +80,23 @@ export default function LeadCaptureModal({
   const [errors, setErrors] = useState<FormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const selectedTier = packageId ? getPricingTierById(packageId) : null;
+
   const handlePaid = useCallback(
-    (receipt: PaymentReceipt, quote: CheckoutQuote) => {
-      onPaymentSuccess?.(receipt, quote);
+    (
+      receipt: PaymentReceipt,
+      quote: CheckoutQuote,
+      activation: CheckoutActivationPayload,
+    ) => {
+      onPaymentSuccess?.(receipt, quote, activation);
     },
     [onPaymentSuccess],
   );
 
   const { isProcessingPayment, initiatePremiumCheckout } = usePayment({
     hasMatchedStyle,
+    layoutPageCount,
+    selectedTier,
     onPaid: handlePaid,
   });
 

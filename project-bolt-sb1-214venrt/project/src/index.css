@@ -1,3 +1,7 @@
+/* Permanent handwriting font layer — MUST stay first (baked data-URI @font-face).
+   Dancing Script + Playpen Sans ship with font-display: block — no CDN at runtime. */
+@import './fonts-embedded.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -6,7 +10,49 @@ html,
 body,
 #root {
   height: 100%;
+  height: 100dvh;
   margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+  text-transform: none;
+}
+
+/* Keep both baked faces warm in the document font set across remounts */
+.nakalai-font-lock {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
+  user-select: none;
+  text-transform: none !important;
+  font-variant: normal;
+}
+
+.nakalai-font-lock--cursive {
+  font-family: 'Dancing Script', cursive;
+  font-weight: 400;
+  font-display: block;
+}
+
+.nakalai-font-lock--print {
+  font-family: 'Playpen Sans', sans-serif;
+  font-weight: 400;
+  font-display: block;
+}
+
+/* Canvas / A4 handwriting surfaces — never inherit uppercase transforms */
+[data-a4-page],
+[data-handwriting-surface],
+canvas[data-matched-font] {
+  text-transform: none !important;
+  font-variant: normal;
 }
 
 /* Handwriting canvas — kill inherited paragraph spacing that breaks rule alignment */
@@ -16,5 +62,5 @@ body,
 [data-a4-page] h3 {
   margin: 0;
   padding: 0;
+  text-transform: none;
 }
-

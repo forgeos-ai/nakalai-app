@@ -1,36 +1,48 @@
 import { useCallback, useRef, useState } from 'react';
-import { INK_COLORS, PAPER_TYPES, FONT_STYLES, HANDWRITING_STYLE_BUCKETS, getBucketLabel } from '../constants';
+import { INK_COLORS, PAPER_TYPES, getFontStyleByClass, MATCHED_PROXY_FONT_ID } from '../constants';
 import type { InkColor, PaperType, FontStyle } from '../constants';
 import {
   PenLine,
   FileText,
-  Type,
   Sparkles,
   FileDown,
   Loader2,
   Upload,
   ScanLine,
   X,
+  Palette,
 } from 'lucide-react';
-import { exportAssignmentPdf } from '../exportPdf';
 import {
-  extractTextFromPdf,
-  assertSinglePdfFile,
-  PDF_EXTRACT_FALLBACK_MESSAGE,
-  PDF_SINGLE_FILE_MESSAGE,
-} from '../extractPdfText';
-import {
-  extractNotebookStyle,
-  STYLE_EXTRACT_ERROR,
   FALLBACK_INK_HEX,
   FALLBACK_SLANT_DEGREES,
   FALLBACK_NOISE,
   FALLBACK_FONT_CLASS,
+  STYLE_EXTRACT_ERROR,
 } from '../utils/styleExtractor';
-import { sliceGlyphsFromFile } from '../utils/glyphSlicer';
+import {
+  buildCustomStyleMapFromFile,
+  setCustomStyleSampleText,
+} from '../utils/customStyleMap';
+
+const PDF_SINGLE_FILE_MESSAGE = 'Only 1 PDF can be converted at a time.';
 
 import type { MatchedStyleOverrides } from '../pageGeometry';
-import type { CheckoutQuote } from '../billing';
+import {
+  isTierSufficient,
+  resolveDefaultTier,
+  toCheckoutActivationPayload,
+  PRICING_PACKAGES,
+  getPricingTierById,
+  type CheckoutActivationPayload,
+  type CheckoutQuote,
+  type PricingTier,
+} from '../billing';
+import {
+  AD_BLOCKER_FREE_DOWNLOAD_WARNING,
+  FREE_TIER_PAGE_ALERT,
+  detectAdBlocker,
+  isWithinFreePageCap,
+} from '../clientGuards';
 import type { PaymentReceipt } from '../paymentGateway';
 import { getStudentProfile } from '../studentProfile';
 import { usePayment } from '../hooks/usePayment';
@@ -43,17 +55,31 @@ type ControlPanelProps = {
   onInkColorChange: (value: InkColor) => void;
   paperType: PaperType;
   onPaperTypeChange: (value: PaperType) => void;
+  /** Auto-matched font from image analysis (display only — not user-picked). */
   fontStyle: FontStyle;
-  onFontStyleChange: (value: FontStyle) => void;
   /** Mock UPI paid — required before clean PDF export. */
   isPaid: boolean;
   matchedStyle?: MatchedStyleOverrides | null;
   onMatchedStyleChange?: (style: MatchedStyleOverrides | null) => void;
   checkoutQuote: CheckoutQuote;
+  layoutPageCount: number;
+  selectedPackageId: string;
+  onSelectPackageId: (packageId: string) => void;
   /** Void paid pass when a new PDF replaces assignment content. */
   onPaidSessionInvalidate?: () => boolean;
   /** Fired after mock gateway + ledger upsert unlocks download. */
-  onPaymentSuccess?: (receipt: PaymentReceipt, quote: CheckoutQuote) => void;
+  onPaymentSuccess?: (
+    receipt: PaymentReceipt,
+    quote: CheckoutQuote,
+    activation: CheckoutActivationPayload,
+  ) => void;
+  /**
+   * Mobile Edit Text shell — show Text + Style + Look together (no section tabs).
+   * Desktop ControlPanel ignores this via default false.
+   */
+  stackAllSections?: boolean;
+  /** Hide NakalAI header chrome (mobile shell already has its own tab bar). */
+  hideBrandChrome?: boolean;
 };
 
 function FieldLabel({
@@ -64,7 +90,7 @@ function FieldLabel({
   children: React.ReactNode;
 }) {
   return (
-    <label className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+    <label className="mb-1 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400 md:text-xs">
       <Icon className="h-3.5 w-3.5" />
       {children}
     </label>
@@ -72,7 +98,19 @@ function FieldLabel({
 }
 
 const selectClass =
-  'w-full appearance-none rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 transition-colors hover:border-slate-600 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500';
+  'w-full appearance-none rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 transition-colors hover:border-slate-600 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500';
+
+type MobileTab = 'text' | 'style' | 'look';
+
+const MOBILE_TABS: {
+  id: MobileTab;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  { id: 'text', label: 'Text', icon: Sparkles },
+  { id: 'style', label: 'Style', icon: ScanLine },
+  { id: 'look', label: 'Look', icon: Palette },
+];
 
 export default function ControlPanel({
   text,
@@ -82,13 +120,17 @@ export default function ControlPanel({
   paperType,
   onPaperTypeChange,
   fontStyle,
-  onFontStyleChange,
   isPaid,
   matchedStyle = null,
   onMatchedStyleChange,
   checkoutQuote,
+  layoutPageCount,
+  selectedPackageId,
+  onSelectPackageId,
   onPaidSessionInvalidate,
   onPaymentSuccess,
+  stackAllSections = false,
+  hideBrandChrome = false,
 }: ControlPanelProps) {
   const [isExporting, setIsExporting] = useState(false);
   const [showLeadModal, setShowLeadModal] = useState(false);
@@ -99,18 +141,51 @@ export default function ControlPanel({
   const styleInputRef = useRef<HTMLInputElement>(null);
   const [isAnalyzingStyle, setIsAnalyzingStyle] = useState(false);
   const [styleError, setStyleError] = useState<string | null>(null);
+  const [mobileTab, setMobileTab] = useState<MobileTab>('text');
+  /** Free download disabled when an ad blocker is detected. */
+  const [adBlockerActive, setAdBlockerActive] = useState(false);
+  const [clientGuardWarning, setClientGuardWarning] = useState<string | null>(
+    null,
+  );
+
+  const selectedTier: PricingTier =
+    getPricingTierById(selectedPackageId) ??
+    getPricingTierById(PRICING_PACKAGES[0]!.id)!;
 
   const handlePaid = useCallback(
-    (receipt: PaymentReceipt, quote: CheckoutQuote) => {
-      onPaymentSuccess?.(receipt, quote);
+    (
+      receipt: PaymentReceipt,
+      quote: CheckoutQuote,
+      activation: CheckoutActivationPayload,
+    ) => {
+      onPaymentSuccess?.(receipt, quote, activation);
     },
     [onPaymentSuccess],
   );
 
   const { isProcessingPayment, initiatePremiumCheckout } = usePayment({
     hasMatchedStyle: Boolean(matchedStyle),
+    layoutPageCount,
+    selectedTier,
     onPaid: handlePaid,
   });
+
+  /** Build the Pay CTA payload: selectedTier.id + priceINR + canvas page count. */
+  const buildActivationPayload = (): CheckoutActivationPayload =>
+    toCheckoutActivationPayload(selectedTier, layoutPageCount);
+
+  const ensureTierFitsLayout = (): boolean => {
+    if (isTierSufficient(selectedTier, layoutPageCount)) return true;
+    const upgraded = resolveDefaultTier(
+      Boolean(matchedStyle),
+      layoutPageCount,
+    );
+    onSelectPackageId(upgraded.id);
+    window.alert(
+      `Your layout is ${layoutPageCount} pages. The 10-page bundle is too small — switched you to the ${upgraded.pages}-page ${upgraded.engine} bundle. Confirm and pay again.`,
+    );
+    return false;
+  };
 
   const rejectMultiFile = () => {
     setPdfExtractError(PDF_SINGLE_FILE_MESSAGE);
@@ -139,12 +214,13 @@ export default function ControlPanel({
     }
 
     let file: File;
+    const pdfMod = await import('../extractPdfText');
     try {
-      file = assertSinglePdfFile(list);
+      file = pdfMod.assertSinglePdfFile(list);
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : PDF_SINGLE_FILE_MESSAGE;
-      if (message === PDF_SINGLE_FILE_MESSAGE) {
+        err instanceof Error ? err.message : pdfMod.PDF_SINGLE_FILE_MESSAGE;
+      if (message === pdfMod.PDF_SINGLE_FILE_MESSAGE) {
         rejectMultiFile();
       } else {
         setPdfExtractError(message);
@@ -162,13 +238,15 @@ export default function ControlPanel({
     onTextChange('');
 
     try {
-      const extracted = await extractTextFromPdf(file);
+      const extracted = await pdfMod.extractTextFromPdf(file);
       onTextChange(extracted);
     } catch (err) {
       console.error('PDF extract failed:', err);
       onTextChange('');
       setPdfExtractError(
-        err instanceof Error ? err.message : PDF_EXTRACT_FALLBACK_MESSAGE,
+        err instanceof Error
+          ? err.message
+          : pdfMod.PDF_EXTRACT_FALLBACK_MESSAGE,
       );
     } finally {
       setIsExtractingPdf(false);
@@ -180,78 +258,127 @@ export default function ControlPanel({
     void handlePdfFiles(e.target.files);
   };
 
-  const handlePdfDrop = (e: React.DragEvent<HTMLDivElement>) => {
+  const handlePdfDrop = (e: React.DragEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
     setIsPdfDragOver(false);
     void handlePdfFiles(e.dataTransfer.files);
   };
 
-  const runPdfExport = async (opts?: { bypassPaidCheck?: boolean }) => {
+  const runPdfExport = async (opts?: {
+    bypassPaidCheck?: boolean;
+    mode?: 'free' | 'paid';
+  }) => {
     if (isExporting) return;
-    if (!opts?.bypassPaidCheck && !isPaid) {
+    const mode = opts?.mode ?? (isPaid ? 'paid' : 'free');
+    if (!opts?.bypassPaidCheck && !isPaid && mode !== 'free') {
       window.alert(
         `${checkoutQuote.ctaLabel} — complete secure checkout to unlock download.`,
       );
       return;
     }
     setIsExporting(true);
+    setClientGuardWarning(null);
     // Let React paint the overlay before heavy canvas work begins
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
     try {
-      await exportAssignmentPdf();
+      const { exportAssignmentPdf } = await import('../exportPdf');
+      await exportAssignmentPdf({ mode });
     } catch (err) {
       console.error('PDF export failed:', err);
-      window.alert(
+      const message =
         err instanceof Error
           ? err.message
-          : 'Failed to generate PDF. Please try again.',
-      );
+          : 'Failed to generate PDF. Please try again.';
+      setClientGuardWarning(message);
+      window.alert(message);
     } finally {
       setIsExporting(false);
     }
   };
 
-  const proceedToDownload = () => {
-    if (!getStudentProfile()) {
+  const proceedToDownload = (mode: 'free' | 'paid' = 'paid') => {
+    if (mode === 'paid' && !getStudentProfile()) {
       setShowLeadModal(true);
       return;
     }
-    void runPdfExport({ bypassPaidCheck: true });
+    void runPdfExport({ bypassPaidCheck: true, mode });
   };
 
+  /**
+   * Download initiation loop — ad-blocker probe → free 3-page cap → paid path.
+   * All rendering stays on-device (exportPdf → createObjectURL).
+   */
   const handleDownloadPdf = () => {
     if (isExporting || isProcessingPayment) return;
 
-    // No profile yet → modal collects lead, then fires initiatePremiumCheckout
-    if (!getStudentProfile()) {
-      setShowLeadModal(true);
-      return;
-    }
+    void (async () => {
+      setClientGuardWarning(null);
 
-    if (!isPaid) {
-      void (async () => {
-        const result = await initiatePremiumCheckout();
+      // 1) Ad-blocker check at the start of the download initiation loop
+      let blocker = false;
+      try {
+        const testAd = await fetch(
+          'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
+          { method: 'HEAD', mode: 'no-cors' },
+        );
+        void testAd;
+        blocker = false;
+      } catch {
+        // Ad-blocker active — disable free download button state
+        blocker = true;
+      }
+      if (!blocker) {
+        blocker = await detectAdBlocker();
+      }
+      setAdBlockerActive(blocker);
+
+      const calculatedPages = layoutPageCount;
+
+      // 2) Unpaid paths
+      if (!isPaid) {
+        // Free tier eligible (≤3 layout pages)
+        if (isWithinFreePageCap(calculatedPages)) {
+          if (blocker) {
+            setClientGuardWarning(AD_BLOCKER_FREE_DOWNLOAD_WARNING);
+            return;
+          }
+          proceedToDownload('free');
+          return;
+        }
+
+        // Free tier blocked — must upgrade to a value pack
+        setClientGuardWarning(FREE_TIER_PAGE_ALERT);
+        window.alert(FREE_TIER_PAGE_ALERT);
+
+        if (!ensureTierFitsLayout()) return;
+        const activation = buildActivationPayload();
+        if (!getStudentProfile()) {
+          setShowLeadModal(true);
+          return;
+        }
+        const result = await initiatePremiumCheckout(undefined, activation);
         if (result?.ok) {
-          proceedToDownload();
+          proceedToDownload('paid');
         } else if (result?.error) {
           window.alert(
             `Payment recorded locally, but ledger sync failed: ${result.error}`,
           );
-          proceedToDownload();
+          proceedToDownload('paid');
         }
-      })();
-      return;
-    }
+        return;
+      }
 
-    proceedToDownload();
+      // 3) Already paid — local full export
+      proceedToDownload('paid');
+    })();
   };
 
   const handleLeadSubmit = () => {
     setShowLeadModal(false);
-    void runPdfExport({ bypassPaidCheck: true });
+    void runPdfExport({ bypassPaidCheck: true, mode: 'paid' });
   };
 
   const handleLeadClose = () => {
@@ -260,37 +387,37 @@ export default function ControlPanel({
 
   const handleStylePhoto = async (file: File | undefined) => {
     if (!file || isAnalyzingStyle || !onMatchedStyleChange) return;
+
+    if (!file.type.startsWith('image/')) {
+      setStyleError('Please upload a character sheet image (PNG or JPEG).');
+      if (styleInputRef.current) styleInputRef.current.value = '';
+      return;
+    }
+
     setStyleError(null);
     setIsAnalyzingStyle(true);
 
     try {
-      // Photo → ink + slant + stroke/connectivity → registry fontClass
-      const extracted = await extractNotebookStyle(file, { inputText: text });
-
-      // Adaptive pixel sifter → layout bias/variance
-      try {
-        await sliceGlyphsFromFile(file);
-      } catch (slicerErr) {
-        console.warn('[NakalAI] Glyph slicer skipped:', slicerErr);
-      }
+      setCustomStyleSampleText(text);
+      const patchResult = await buildCustomStyleMapFromFile(file, text);
+      const matchedLayout = getFontStyleByClass(MATCHED_PROXY_FONT_ID);
 
       onMatchedStyleChange({
-        inkHex: extracted.inkHex,
-        slantDegrees: extracted.slantDegrees,
-        noiseIntensity: extracted.noiseIntensity,
-        fontCategory: extracted.fontCategory,
-        fontClass: extracted.fontClass,
+        inkHex: INK_COLORS[0].hex,
+        slantDegrees: matchedLayout.layout.slantDegrees,
+        noiseIntensity: 0.12,
+        fontCategory: matchedLayout.bucket,
+        fontClass: MATCHED_PROXY_FONT_ID,
       });
 
-      if (extracted.usedFallback) {
-        setStyleError(
-          'Photo was unclear — applied dark blue gel-pen defaults. Try a sharper notebook shot for a closer match.',
-        );
-      } else {
-        setStyleError(null);
-      }
+      console.info(
+        '[NakalAI] Character patch matrix ready:',
+        patchResult.patchCount,
+        'cells',
+      );
+      setStyleError(null);
     } catch (err) {
-      console.error('Style extract failed:', err);
+      console.error('Style upload failed:', err);
       onMatchedStyleChange({
         inkHex: FALLBACK_INK_HEX,
         slantDegrees: FALLBACK_SLANT_DEGREES,
@@ -308,12 +435,14 @@ export default function ControlPanel({
   };
 
   return (
-    <aside className="relative flex h-full w-full flex-col bg-slate-900">
+    <aside className="relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-slate-900">
       <LeadCaptureModal
         open={showLeadModal}
         onSubmit={handleLeadSubmit}
         onClose={handleLeadClose}
         hasMatchedStyle={Boolean(matchedStyle)}
+        packageId={selectedPackageId}
+        layoutPageCount={layoutPageCount}
         isPaid={isPaid}
         onPaymentSuccess={onPaymentSuccess}
       />
@@ -332,48 +461,106 @@ export default function ControlPanel({
         </div>
       )}
 
-      {/* Header */}
-      <div className="border-b border-slate-800 px-6 py-5">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 shadow-lg shadow-sky-500/20">
-            <PenLine className="h-5 w-5 text-white" />
+      {/* Header — compact on mobile */}
+      {!hideBrandChrome && (
+      <div className="shrink-0 border-b border-slate-800 px-4 py-2 md:px-6 md:py-3">
+        <div className="flex items-center gap-2.5 md:gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500 to-indigo-600 shadow-lg shadow-sky-500/20 md:h-9 md:w-9 md:rounded-xl">
+            <PenLine className="h-4 w-4 text-white" />
           </div>
-          <div>
-            <h1 className="text-xl font-bold text-white">NakalAI</h1>
-            <p className="text-xs text-slate-400">Text to Handwriting Converter</p>
+          <div className="min-w-0">
+            <h1 className="text-base font-bold text-white md:text-lg">NakalAI</h1>
+            <p className="truncate text-[10px] text-slate-400">
+              Text to Handwriting Converter
+            </p>
           </div>
         </div>
+        <nav
+          className="mt-1.5 hidden flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-500 md:mt-2 md:flex md:text-xs"
+          aria-label="Site"
+        >
+          <a className="hover:text-sky-300" href="/pricing">
+            Pricing
+          </a>
+          <a className="hover:text-sky-300" href="/faq">
+            FAQ
+          </a>
+          <a className="hover:text-sky-300" href="/blog">
+            Blog
+          </a>
+          <a className="hover:text-sky-300" href="/text-to-handwriting">
+            Text to handwriting
+          </a>
+          <a className="hover:text-sky-300" href="/about">
+            About
+          </a>
+        </nav>
       </div>
+      )}
 
-      {/* Scrollable controls */}
-      <div className="flex-1 overflow-y-auto px-6 py-6">
+      {/* Mobile section tabs — desktop sidebar only (hidden when stackAllSections) */}
+      {!stackAllSections && (
+      <nav
+        className="flex shrink-0 border-b border-slate-800 md:hidden"
+        aria-label="Control sections"
+      >
+        {MOBILE_TABS.map(({ id, label, icon: Icon }) => {
+          const active = mobileTab === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setMobileTab(id)}
+              className={`flex flex-1 flex-col items-center gap-0.5 px-1 py-1.5 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+                active
+                  ? 'border-b-2 border-sky-400 text-sky-300'
+                  : 'border-b-2 border-transparent text-slate-500 hover:text-slate-300'
+              }`}
+              aria-current={active ? 'page' : undefined}
+            >
+              <Icon className="h-4 w-4" />
+              {label}
+            </button>
+          );
+        })}
+      </nav>
+      )}
+
+      {/* Controls — no outer scroll; only the assignment textarea scrolls */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-2 md:px-5 md:py-3">
         {/* Textarea + PDF extract */}
-        <div className="mb-6">
+        <div
+          className={`min-h-0 flex-1 flex-col ${
+            stackAllSections || mobileTab === 'text'
+              ? 'flex'
+              : 'hidden md:flex'
+          }`}
+        >
           <FieldLabel icon={Sparkles}>Assignment Text</FieldLabel>
 
-          <div className="relative">
+          <div className="relative min-h-[5.5rem] flex-1">
             <textarea
               value={text}
               onChange={(e) => onTextChange(e.target.value)}
               placeholder="Paste your assignment text here..."
               disabled={isExtractingPdf}
-              className="h-64 w-full resize-none rounded-lg border border-slate-700 bg-slate-800 p-4 text-sm leading-relaxed text-slate-100 placeholder-slate-500 transition-colors hover:border-slate-600 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-60"
+              className="absolute inset-0 h-full w-full resize-none overflow-y-auto rounded-lg border border-slate-700 bg-slate-800 p-2.5 text-sm leading-relaxed text-slate-100 placeholder-slate-500 transition-colors hover:border-slate-600 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-60 md:p-3"
             />
             {isExtractingPdf && (
               <div
-                className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-lg bg-slate-950/80 backdrop-blur-sm"
+                className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-slate-950/80 backdrop-blur-sm"
                 role="status"
                 aria-live="polite"
               >
-                <Loader2 className="h-8 w-8 animate-spin text-sky-400" />
-                <p className="px-4 text-center text-sm font-medium text-slate-100">
+                <Loader2 className="h-6 w-6 animate-spin text-sky-400" />
+                <p className="px-4 text-center text-xs font-medium text-slate-100">
                   Extracting text from PDF...
                 </p>
               </div>
             )}
           </div>
 
-          <div className="mt-2 flex justify-between text-xs text-slate-500">
+          <div className="mt-1 flex shrink-0 justify-between text-[10px] text-slate-500">
             <span>{text.length} characters</span>
             <span>{text.trim() ? text.trim().split(/\s+/).length : 0} words</span>
           </div>
@@ -387,15 +574,8 @@ export default function ControlPanel({
             onChange={handlePdfInputChange}
           />
 
-          <div
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                if (!isExtractingPdf) pdfInputRef.current?.click();
-              }
-            }}
+          <button
+            type="button"
             onClick={() => {
               if (!isExtractingPdf) pdfInputRef.current?.click();
             }}
@@ -415,29 +595,26 @@ export default function ControlPanel({
               setIsPdfDragOver(false);
             }}
             onDrop={handlePdfDrop}
-            className={`mt-3 flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-3 py-4 text-sm font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-sky-500 ${
-              isExtractingPdf
-                ? 'cursor-not-allowed border-slate-700 bg-slate-800/40 text-slate-500 opacity-60'
-                : isPdfDragOver
-                  ? 'border-sky-500 bg-sky-500/10 text-white'
-                  : 'border-slate-600 bg-slate-800/60 text-slate-200 hover:border-sky-500/60 hover:bg-slate-800 hover:text-white'
+            disabled={isExtractingPdf}
+            className={`mt-1.5 flex w-full shrink-0 items-center gap-2 rounded-lg border border-dashed px-2.5 py-1.5 text-left text-[11px] font-medium leading-snug transition-colors focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-60 md:text-xs ${
+              isPdfDragOver
+                ? 'border-sky-500 bg-sky-500/10 text-white'
+                : 'border-slate-600 bg-slate-800/60 text-slate-200 hover:border-sky-500/60 hover:bg-slate-800 hover:text-white'
             }`}
-            aria-disabled={isExtractingPdf}
           >
             {isExtractingPdf ? (
-              <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />
             ) : (
-              <Upload className="h-4 w-4 text-sky-400" />
+              <Upload className="h-3.5 w-3.5 shrink-0 text-sky-400" />
             )}
-            <span>Upload PDF to extract text</span>
-            <span className="text-xs font-normal text-slate-500">
-              One PDF only · replaces current assignment text
+            <span className="min-w-0 truncate">
+              Upload PDF to extract text (Replaces current text)
             </span>
-          </div>
+          </button>
 
           {pdfExtractError && (
             <p
-              className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200"
+              className="mt-1.5 shrink-0 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-200"
               role="alert"
             >
               {pdfExtractError}
@@ -445,47 +622,15 @@ export default function ControlPanel({
           )}
         </div>
 
-        {/* Ink Color */}
-        <div className="mb-5">
-          <FieldLabel icon={PenLine}>Ink Color</FieldLabel>
-          <div className="grid grid-cols-3 gap-2">
-            {INK_COLORS.map((color) => {
-              const active = color.id === inkColor.id;
-              return (
-                <button
-                  key={color.id}
-                  onClick={() => onInkColorChange(color)}
-                  className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium transition-all ${
-                    active
-                      ? 'border-sky-500 bg-sky-500/10 text-white'
-                      : 'border-slate-700 bg-slate-800 text-slate-300 hover:border-slate-600'
-                  }`}
-                >
-                  <span
-                    className="h-3.5 w-3.5 rounded-full ring-1 ring-white/20"
-                    style={{ backgroundColor: color.hex }}
-                  />
-                  {color.label}
-                </button>
-              );
-            })}
-          </div>
-          {inkColor.id === 'matched' && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
-              <span
-                className="h-3 w-3 rounded-full ring-1 ring-white/20"
-                style={{ backgroundColor: inkColor.hex }}
-              />
-              Matched ink {inkColor.hex}
-            </div>
-          )}
-        </div>
-
-        {/* Match My Writing Style — premium canvas photo analysis */}
-        <div className="mb-5">
-          <FieldLabel icon={ScanLine}>
-            Match My Writing Style
-          </FieldLabel>
+        {/* Match My Writing Style */}
+        <div
+          className={`mt-2 shrink-0 py-1 ${
+            stackAllSections || mobileTab === 'style'
+              ? 'block'
+              : 'hidden md:block'
+          }`}
+        >
+          <FieldLabel icon={ScanLine}>Match My Writing Style</FieldLabel>
           <input
             ref={styleInputRef}
             type="file"
@@ -498,71 +643,43 @@ export default function ControlPanel({
             type="button"
             onClick={() => styleInputRef.current?.click()}
             disabled={isAnalyzingStyle}
-            className="flex w-full flex-col items-start gap-1 rounded-xl border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-sky-500/10 px-4 py-3.5 text-left transition-all hover:border-amber-400/50 hover:from-amber-500/15 hover:to-sky-500/15 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex w-full items-center gap-2 rounded-lg border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-sky-500/10 px-3 py-2 text-left text-xs font-semibold text-amber-100 transition-all hover:border-amber-400/50 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <span className="flex items-center gap-2 text-sm font-semibold text-amber-100">
-              {isAnalyzingStyle ? (
-                <Loader2 className="h-4 w-4 animate-spin text-amber-300" />
-              ) : (
-                <ScanLine className="h-4 w-4 text-amber-300" />
-              )}
-              ✨ Match My Writing Style
-            </span>
-            <span className="text-xs font-normal leading-relaxed text-slate-400">
-              Upload past notebook photo — matches ink, slant &amp; handwriting family
+            {isAnalyzingStyle ? (
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-300" />
+            ) : (
+              <ScanLine className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+            )}
+            <span className="truncate">
+              {isAnalyzingStyle
+                ? 'Analyzing handwriting…'
+                : 'Match My Writing Style'}
             </span>
           </button>
 
           {matchedStyle && (
-            <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2.5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="space-y-1 text-xs text-slate-300">
-                  <p className="flex items-center gap-2">
-                    <span
-                      className="inline-block h-3 w-3 rounded-full ring-1 ring-white/20"
-                      style={{ backgroundColor: matchedStyle.inkHex }}
-                    />
-                    Ink {matchedStyle.inkHex}
-                  </p>
-                  <p>Slant {matchedStyle.slantDegrees.toFixed(1)}°</p>
-                  <p>Noise {(matchedStyle.noiseIntensity * 100).toFixed(0)}%</p>
-                  <p>
-                    Font{' '}
-                    {FONT_STYLES.find((f) => f.id === matchedStyle.fontClass)
-                      ?.label ?? matchedStyle.fontClass}
-                  </p>
-                  {matchedStyle.fontCategory && (
-                    <p className="text-slate-400">
-                      Tag {matchedStyle.fontCategory}
-                    </p>
-                  )}
-                  <p className="text-slate-400">
-                    {getBucketLabel(
-                      FONT_STYLES.find((f) => f.id === matchedStyle.fontClass)
-                        ?.bucket ?? fontStyle.bucket,
-                    )}
-                  </p>
-                  {!isPaid && (
-                    <p className="pt-1 text-amber-300/90">
-                      Preview unlocked · pay to export clean PDF
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onMatchedStyleChange?.(null)}
-                  className="rounded-md p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
-                  aria-label="Clear matched style"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
+            <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5">
+              <p className="flex min-w-0 items-center gap-2 text-[11px] text-slate-300">
+                <span
+                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/20"
+                  style={{ backgroundColor: matchedStyle.inkHex }}
+                />
+                <span className="truncate">Style matched</span>
+              </p>
+              <button
+                type="button"
+                onClick={() => onMatchedStyleChange?.(null)}
+                className="rounded-md p-0.5 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+                aria-label="Clear matched style"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
           )}
 
           {styleError && (
             <p
-              className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200"
+              className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-200"
               role="alert"
             >
               {styleError}
@@ -570,89 +687,138 @@ export default function ControlPanel({
           )}
         </div>
 
-        {/* Paper Type */}
-        <div className="mb-5">
-          <FieldLabel icon={FileText}>Paper Type</FieldLabel>
-          <select
-            value={paperType.id}
-            onChange={(e) =>
-              onPaperTypeChange(PAPER_TYPES.find((p) => p.id === e.target.value)!)
-            }
-            className={selectClass}
-          >
-            {PAPER_TYPES.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Font Style — 12 families across 5 style buckets */}
-        <div className="mb-5">
-          <FieldLabel icon={Type}>Handwriting Style</FieldLabel>
-          <select
-            value={fontStyle.id}
-            onChange={(e) =>
-              onFontStyleChange(FONT_STYLES.find((f) => f.id === e.target.value)!)
-            }
-            className={selectClass}
-          >
-            {HANDWRITING_STYLE_BUCKETS.map((bucket) => (
-              <optgroup key={bucket.id} label={bucket.label}>
-                {FONT_STYLES.filter((f) => f.bucket === bucket.id).map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          <div
-            className={`mt-3 rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-lg text-slate-100 ${fontStyle.className}`}
-          >
-            The quick brown fox
+        {/* Ink / Paper — Look tab on mobile */}
+        <div
+          className={`mt-2 shrink-0 space-y-2 py-1 ${
+            stackAllSections || mobileTab === 'look'
+              ? 'block'
+              : 'hidden md:block'
+          }`}
+        >
+          <div>
+            <FieldLabel icon={PenLine}>Ink Color</FieldLabel>
+            <div className="grid grid-cols-3 gap-1.5">
+              {INK_COLORS.map((color) => {
+                const active = color.id === inkColor.id;
+                return (
+                  <button
+                    key={color.id}
+                    type="button"
+                    onClick={() => onInkColorChange(color)}
+                    className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition-all md:text-xs ${
+                      active
+                        ? 'border-sky-500 bg-sky-500/10 text-white'
+                        : 'border-slate-700 bg-slate-800 text-slate-300 hover:border-slate-600'
+                    }`}
+                  >
+                    <span
+                      className="h-3 w-3 shrink-0 rounded-full ring-1 ring-white/20"
+                      style={{ backgroundColor: color.hex }}
+                    />
+                    <span className="truncate">{color.label}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <p className="mt-1.5 text-[11px] text-slate-500">
-            {getBucketLabel(fontStyle.bucket)} · jitter{' '}
-            {(fontStyle.layout.baselineJitter * 100).toFixed(0)}% · line{' '}
-            {fontStyle.layout.lineSpaceScale.toFixed(2)}×
-          </p>
+
+          <div>
+            <FieldLabel icon={FileText}>Paper Type</FieldLabel>
+            <select
+              value={paperType.id}
+              onChange={(e) =>
+                onPaperTypeChange(
+                  PAPER_TYPES.find((p) => p.id === e.target.value)!,
+                )
+              }
+              className={selectClass}
+            >
+              {PAPER_TYPES.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
-      {/* Download FAB + footer */}
-      <div className="border-t border-slate-800 px-6 py-4">
-        <p
-          className="mb-3 rounded-lg border border-sky-500/25 bg-sky-500/10 px-3 py-2.5 text-xs leading-relaxed text-sky-100/90"
-          role="note"
-        >
-          Each payment unlocks 1 specific assignment download. Modifying the text
-          will require a new download pass.
-        </p>
+      {/* Primary download / pay dock — always pinned in view */}
+      <div className="shrink-0 border-t border-slate-800 px-3 py-1.5 md:px-5 md:py-2">
+        {!isPaid && (
+          <div className="mb-1.5 space-y-1">
+            <label
+              htmlFor="package-select"
+              className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+            >
+              Select Your Package
+            </label>
+            <select
+              id="package-select"
+              value={selectedPackageId}
+              onChange={(e) => onSelectPackageId(e.target.value)}
+              className={`${selectClass} py-1.5 text-xs`}
+              aria-label="Select your package"
+            >
+              {PRICING_PACKAGES.map((pkg) => (
+                <option key={pkg.id} value={pkg.id}>
+                  {pkg.label}
+                </option>
+              ))}
+            </select>
+            {layoutPageCount > 10 && selectedTier.pages === 10 && (
+              <p className="text-[10px] leading-snug text-amber-300/90">
+                Layout is {layoutPageCount} pages — pick a 75-page pack.
+              </p>
+            )}
+          </div>
+        )}
+        {(clientGuardWarning || adBlockerActive) && (
+          <p
+            className="mb-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-100"
+            role="alert"
+          >
+            {clientGuardWarning ??
+              (adBlockerActive ? AD_BLOCKER_FREE_DOWNLOAD_WARNING : null)}
+          </p>
+        )}
         <button
           type="button"
           onClick={handleDownloadPdf}
-          disabled={isExporting || isProcessingPayment}
-          className="group flex w-full items-center justify-center gap-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:from-sky-400 hover:to-indigo-500 hover:shadow-sky-500/40 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={
+            isExporting ||
+            isProcessingPayment ||
+            (!isPaid &&
+              isWithinFreePageCap(layoutPageCount) &&
+              adBlockerActive)
+          }
+          className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:from-sky-400 hover:to-indigo-500 hover:shadow-sky-500/40 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-60 md:text-sm"
         >
           {isProcessingPayment ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
-            <FileDown className="h-5 w-5 transition-transform group-hover:-translate-y-0.5" />
+            <FileDown className="h-4 w-4 transition-transform group-hover:-translate-y-0.5" />
           )}
-          {isProcessingPayment
-            ? 'Processing Secure Payment...'
-            : isPaid
-              ? 'Download Assignment PDF'
-              : checkoutQuote.ctaLabel}
+          <span className="truncate">
+            {isProcessingPayment
+              ? 'Processing Secure Payment...'
+              : isPaid
+                ? 'Download Assignment PDF'
+                : isWithinFreePageCap(layoutPageCount)
+                  ? adBlockerActive
+                    ? 'Free download blocked · disable ad blocker'
+                    : 'Download free (≤3 pages)'
+                  : `Pay now to unlock · ₹${selectedTier.amountInr}`}
+          </span>
         </button>
-        <p className="mt-3 text-center text-xs text-slate-500">
+        <p className="mt-1 text-center text-[10px] text-slate-500">
           {isProcessingPayment
             ? 'Confirming gateway · updating download permissions…'
             : isPaid
               ? checkoutQuote.paidLabel
-              : `${checkoutQuote.tier_type === 'premium' ? 'Premium' : 'Standard'} · ₹${checkoutQuote.amountInr}`}
+              : isWithinFreePageCap(layoutPageCount)
+                ? 'Client-side free PDF · Made with NakalAI footer'
+                : `${selectedTier.pages}-page ${selectedTier.engine} · ${layoutPageCount} canvas page${layoutPageCount === 1 ? '' : 's'}`}
         </p>
       </div>
     </aside>

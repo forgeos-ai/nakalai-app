@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="NakalAI text to handwriting">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#g)"/>
+  <text x="80" y="280" fill="#e0f2fe" font-family="Georgia, serif" font-size="72">NakalAI</text>
+  <text x="80" y="360" fill="#bae6fd" font-family="system-ui, sans-serif" font-size="36">Text to handwriting for assignments</text>
+  <text x="80" y="430" fill="#7dd3fc" font-family="system-ui, sans-serif" font-size="28">Free preview · ¹19 / ¹49 clean PDF</text>
+</svg>

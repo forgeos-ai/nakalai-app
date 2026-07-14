@@ -5,6 +5,8 @@ type MockPaymentToggleProps = {
   isPaid: boolean;
   onToggle: () => void;
   checkoutQuote: CheckoutQuote;
+  /** sticky = desktop canvas header; inline = mobile feed block (scrolls away). */
+  layout?: 'sticky' | 'inline';
 };
 
 /**
@@ -15,12 +17,15 @@ export default function MockPaymentToggle({
   isPaid,
   onToggle,
   checkoutQuote,
+  layout = 'sticky',
 }: MockPaymentToggleProps) {
+  const shellClass =
+    layout === 'inline'
+      ? 'mb-4 flex w-full items-center justify-between gap-3 rounded-xl border bg-white p-4 shadow-sm'
+      : 'sticky top-0 z-30 mb-2 flex w-full max-w-[794px] items-center justify-between gap-3 rounded-xl border border-slate-300/80 bg-white/95 px-4 py-3 shadow-sm backdrop-blur';
+
   return (
-    <div
-      data-pdf-ignore="true"
-      className="sticky top-0 z-30 mb-2 flex w-full max-w-[794px] items-center justify-between gap-3 rounded-xl border border-slate-300/80 bg-white/95 px-4 py-3 shadow-sm backdrop-blur"
-    >
+    <div data-pdf-ignore="true" className={shellClass}>
       <div className="min-w-0">
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
           {checkoutQuote.tier_type === 'premium'

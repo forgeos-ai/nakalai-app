@@ -11,7 +11,14 @@ import {
   completeMockPayment,
   type PaymentReceipt,
 } from '../paymentGateway';
-import { getCheckoutQuote, type CheckoutQuote } from '../billing';
+import {
+  quoteFromTier,
+  resolveDefaultTier,
+  toCheckoutActivationPayload,
+  type CheckoutActivationPayload,
+  type CheckoutQuote,
+  type PricingTier,
+} from '../billing';
 import { syncLocalPaymentStatus, getStudentProfile } from '../studentProfile';
 
 const GATEWAY_DELAY_MS = 1500;
@@ -20,15 +27,21 @@ export type PremiumCheckoutResult = {
   ok: boolean;
   receipt: PaymentReceipt | null;
   quote: CheckoutQuote;
+  activation: CheckoutActivationPayload;
   ledgerSynced: boolean;
   error?: string;
 };
 
 export type UsePaymentOptions = {
-  /** When true, quote is premium ₹49 (Match My Style active). */
   hasMatchedStyle: boolean;
-  /** Called after a successful simulated gateway + local unlock. */
-  onPaid?: (receipt: PaymentReceipt, quote: CheckoutQuote) => void;
+  layoutPageCount?: number;
+  /** Explicit tier selected in the page-bundle matrix. */
+  selectedTier?: PricingTier | null;
+  onPaid?: (
+    receipt: PaymentReceipt,
+    quote: CheckoutQuote,
+    activation: CheckoutActivationPayload,
+  ) => void;
 };
 
 /**
@@ -94,17 +107,26 @@ export async function upsertPremiumSubscription(
 }
 
 /**
- * Mock payment gate — simulates Razorpay/Stripe checkout for the premium tier.
- *
- * Step A: isProcessingPayment = true
- * Step B: 1.5s network delay
- * Step C: Supabase ledger upsert + local paid receipt
+ * Mock payment gate — simulates Razorpay/Stripe checkout for a selected page bundle.
+ * Prefer passing `activation` from the Pay CTA (`id`, `priceINR`, `pageCount`).
  */
 export async function initiatePremiumCheckout(
   userId: string,
   hasMatchedStyle = true,
+  layoutPageCount = 1,
+  selectedTier?: PricingTier | null,
+  activationOverride?: CheckoutActivationPayload | null,
 ): Promise<PremiumCheckoutResult> {
-  const quote = getCheckoutQuote(hasMatchedStyle);
+  const tier =
+    selectedTier ?? resolveDefaultTier(hasMatchedStyle, layoutPageCount);
+  const activation =
+    activationOverride ??
+    toCheckoutActivationPayload(tier, layoutPageCount);
+  const quote = quoteFromTier(tier);
+
+  if (import.meta.env.DEV) {
+    console.info('[NakalAI] checkout activation', activation);
+  }
 
   await new Promise<void>((resolve) => {
     setTimeout(resolve, GATEWAY_DELAY_MS);
@@ -118,6 +140,7 @@ export async function initiatePremiumCheckout(
     ok: true,
     receipt,
     quote,
+    activation,
     ledgerSynced: ledger.ok,
     error: ledger.error,
   };
@@ -126,7 +149,12 @@ export async function initiatePremiumCheckout(
 /**
  * React hook wrapping the mock premium checkout lifecycle.
  */
-export function usePayment({ hasMatchedStyle, onPaid }: UsePaymentOptions) {
+export function usePayment({
+  hasMatchedStyle,
+  layoutPageCount = 1,
+  selectedTier = null,
+  onPaid,
+}: UsePaymentOptions) {
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<PremiumCheckoutResult | null>(
@@ -134,7 +162,10 @@ export function usePayment({ hasMatchedStyle, onPaid }: UsePaymentOptions) {
   );
 
   const startPremiumCheckout = useCallback(
-    async (userIdOverride?: string) => {
+    async (
+      userIdOverride?: string,
+      activationOverride?: CheckoutActivationPayload | null,
+    ) => {
       if (isProcessingPayment) return null;
 
       setIsProcessingPayment(true);
@@ -143,11 +174,17 @@ export function usePayment({ hasMatchedStyle, onPaid }: UsePaymentOptions) {
       try {
         const userId =
           (userIdOverride?.trim() || resolveCheckoutUserId()).toLowerCase();
-        const result = await initiatePremiumCheckout(userId, hasMatchedStyle);
+        const result = await initiatePremiumCheckout(
+          userId,
+          hasMatchedStyle,
+          layoutPageCount,
+          selectedTier,
+          activationOverride,
+        );
         setLastResult(result);
 
         if (result.ok && result.receipt) {
-          onPaid?.(result.receipt, result.quote);
+          onPaid?.(result.receipt, result.quote, result.activation);
         } else if (result.error) {
           setPaymentError(result.error);
         }
@@ -162,7 +199,13 @@ export function usePayment({ hasMatchedStyle, onPaid }: UsePaymentOptions) {
         setIsProcessingPayment(false);
       }
     },
-    [hasMatchedStyle, isProcessingPayment, onPaid],
+    [
+      hasMatchedStyle,
+      isProcessingPayment,
+      layoutPageCount,
+      onPaid,
+      selectedTier,
+    ],
   );
 
   return {
