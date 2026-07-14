@@ -1,7 +1,16 @@
-import type { MetadataRoute } from 'next';
 import { SITE_URL } from '../content/seo/metadata/site';
 
-export default function robots(): MetadataRoute.Robots {
+export type RobotsConfig = {
+  rules: {
+    userAgent: string;
+    allow: string;
+    disallow: string[];
+  };
+  sitemap: string;
+};
+
+/** Plain robots config — mirrored by public/robots.txt for static hosting. */
+export default function buildRobots(): RobotsConfig {
   return {
     rules: {
       userAgent: '*',

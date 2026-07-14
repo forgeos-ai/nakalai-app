@@ -1,11 +1,13 @@
-import type { Metadata } from 'next';
-import { DEFAULT_OG_IMAGE, SITE_NAME, SITE_URL } from '../metadata/site';
+import type { PageMetadata } from './types';
+import { DEFAULT_OG_IMAGE, SITE_NAME, SITE_URL } from './site';
 import {
   resolveLandingPage,
   type ResolvedLandingPage,
 } from '../landing-pages/registry';
 
-export function landingPageToMetadata(page: ResolvedLandingPage): Metadata {
+export type { PageMetadata, PageMetadataImage } from './types';
+
+export function landingPageToMetadata(page: ResolvedLandingPage): PageMetadata {
   const url = `${SITE_URL}${page.canonicalPath === '/' ? '/' : page.canonicalPath}`;
   return {
     title: page.title,
@@ -42,6 +44,6 @@ export function landingPageToMetadata(page: ResolvedLandingPage): Metadata {
   };
 }
 
-export function buildLandingMetadata(slug: string | undefined): Metadata {
+export function buildLandingMetadata(slug: string | undefined): PageMetadata {
   return landingPageToMetadata(resolveLandingPage(slug));
 }

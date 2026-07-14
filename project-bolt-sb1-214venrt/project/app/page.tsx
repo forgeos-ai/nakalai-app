@@ -1,17 +1,18 @@
-'use client';
+import { lazy, Suspense } from 'react';
 
-import dynamic from 'next/dynamic';
+const App = lazy(() => import('../../src/App'));
 
-const App = dynamic(() => import('../src/App'), {
-  ssr: false,
-  loading: () => (
-    <div className="flex h-[100dvh] items-center justify-center bg-slate-900 text-sm text-slate-400">
-      Loading NakalAI…
-    </div>
-  ),
-});
+const loading = (
+  <div className="flex h-[100dvh] items-center justify-center bg-slate-900 text-sm text-slate-400">
+    Loading NakalAI…
+  </div>
+);
 
-/** Home — core handwriting workspace. */
+/** Home — core handwriting workspace (Vite-compatible; not a Next.js page). */
 export default function HomePage() {
-  return <App />;
+  return (
+    <Suspense fallback={loading}>
+      <App />
+    </Suspense>
+  );
 }

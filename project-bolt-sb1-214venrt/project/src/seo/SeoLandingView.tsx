@@ -1,18 +1,15 @@
-'use client';
-
-import dynamic from 'next/dynamic';
+import { lazy, Suspense } from 'react';
 import type { ResolvedLandingPage } from './resolveSeoKeyword';
 import { getRelatedLandingPages } from '../../content/seo/landing-pages/registry';
 import { seoBulkValueLine, seoPricingBlurb } from './pricingCopy';
 
-const App = dynamic(() => import('../App'), {
-  ssr: false,
-  loading: () => (
-    <div className="flex h-full items-center justify-center bg-slate-900 text-sm text-slate-400">
-      Loading handwriting workspace…
-    </div>
-  ),
-});
+const App = lazy(() => import('../App'));
+
+const workspaceFallback = (
+  <div className="flex h-full items-center justify-center bg-slate-900 text-sm text-slate-400">
+    Loading handwriting workspace…
+  </div>
+);
 
 type Props = {
   config: ResolvedLandingPage;
@@ -138,14 +135,16 @@ export default function SeoLandingView({ config }: Props) {
           </p>
         </div>
         <div className="h-[min(85vh,920px)] w-full overflow-hidden border-t border-slate-800">
-          <App
-            embedded
-            workspacePreset={{
-              text: config.workspace.text,
-              inkId: config.workspace.inkId,
-              paperId: config.workspace.paperId,
-            }}
-          />
+          <Suspense fallback={workspaceFallback}>
+            <App
+              embedded
+              workspacePreset={{
+                text: config.workspace.text,
+                inkId: config.workspace.inkId,
+                paperId: config.workspace.paperId,
+              }}
+            />
+          </Suspense>
         </div>
       </section>
 
