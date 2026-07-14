@@ -30,6 +30,7 @@ import {
 } from './pageGeometry';
 import { clearJitterCache } from './jitter';
 import { clearCustomStyleMap } from './utils/customStyleMap';
+import { clearHandwritingProfile } from './handwriting';
 import {
   matchedFonts,
   googleFontNameForClass,
@@ -91,6 +92,28 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
   const [activeMobileTab, setActiveMobileTab] =
     useState<MobileShellTab>('edit');
 
+  /**
+   * Client-only viewport gate — never read `window` / `navigator` during
+   * render or useState initializers (SSR / pre-mount crash → blank white page).
+   */
+  const [isMounted, setIsMounted] = useState(false);
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+    const checkMobile = () => {
+      const widthCheck = window.innerWidth < 768;
+      const agentCheck =
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+          navigator.userAgent,
+        );
+      setIsMobileDevice(widthCheck || agentCheck);
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
   const layoutPageCount = useMemo(() => {
     if (typeof document === 'undefined') return 1;
     return Math.max(1, paginateText(text, fontStyle).length);
@@ -135,13 +158,12 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
   const voidPaidPassIfNeeded = useCallback(() => {
     const receipt = invalidatePaidSessionForContentChange(
       Boolean(matchedStyles),
-      layoutPageCount,
     );
     if (!receipt) return false;
     syncLocalPaymentStatus(false, receipt);
     setIsPaid(false);
     return true;
-  }, [matchedStyles, layoutPageCount]);
+  }, [matchedStyles]);
 
   const handleTextChange = useCallback(
     (value: string) => {
@@ -205,6 +227,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
       setStyleRevision((r) => r + 1);
     } else {
       clearCustomStyleMap();
+      clearHandwritingProfile();
       clearMatchedStyleOverrides();
       setMatchedStyles(null);
       setInkColor(resolveInk(workspacePreset?.inkId));
@@ -263,68 +286,70 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
         <span className="nakalai-font-lock--print">AaBbCc</span>
       </div>
 
-      {/* —— Mobile shell (tabbed; never side-by-side) —— */}
-      <div className="flex h-[100dvh] w-full flex-col overflow-hidden md:hidden">
-        <nav
-          className="flex shrink-0 border-b border-slate-800 bg-slate-950/95 px-2 pt-[max(0.5rem,env(safe-area-inset-top))]"
-          aria-label="Mobile workspace"
-        >
-          <button
-            type="button"
-            onClick={() => setActiveMobileTab('edit')}
-            className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-2.5 text-xs font-semibold transition-colors ${
-              activeMobileTab === 'edit'
-                ? 'bg-sky-500/15 text-sky-300'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-            aria-pressed={activeMobileTab === 'edit'}
+      {!isMounted ? null : isMobileDevice ? (
+        /* —— Mobile shell (tabbed; never side-by-side) —— */
+        <div className="flex h-[100dvh] w-full flex-col overflow-hidden">
+          <nav
+            className="flex shrink-0 border-b border-slate-800 bg-slate-950/95 px-2 pt-[max(0.5rem,env(safe-area-inset-top))]"
+            aria-label="Mobile workspace"
           >
-            <span aria-hidden>📝</span>
-            Edit Text
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveMobileTab('preview')}
-            className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-2.5 text-xs font-semibold transition-colors ${
-              activeMobileTab === 'preview'
-                ? 'bg-sky-500/15 text-sky-300'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-            aria-pressed={activeMobileTab === 'preview'}
-          >
-            <span aria-hidden>👁️</span>
-            Preview Page
-          </button>
-        </nav>
+            <button
+              type="button"
+              onClick={() => setActiveMobileTab('edit')}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-2.5 text-xs font-semibold transition-colors ${
+                activeMobileTab === 'edit'
+                  ? 'bg-sky-500/15 text-sky-300'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              aria-pressed={activeMobileTab === 'edit'}
+            >
+              <span aria-hidden>📝</span>
+              Edit Text
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveMobileTab('preview')}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-2.5 text-xs font-semibold transition-colors ${
+                activeMobileTab === 'preview'
+                  ? 'bg-sky-500/15 text-sky-300'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              aria-pressed={activeMobileTab === 'preview'}
+            >
+              <span aria-hidden>👁️</span>
+              Preview Page
+            </button>
+          </nav>
 
-        {activeMobileTab === 'edit' ? (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <ControlPanel
-              {...controlPanelProps}
-              stackAllSections
-              hideBrandChrome
-            />
-          </div>
-        ) : (
-          <div className="flex flex-1 w-full flex-col items-center overflow-x-hidden overflow-y-auto p-4">
-            <PaperSheet
-              key={`${sheetKey}-mobile`}
-              {...paperSheetProps}
-              fitMobileViewport
-            />
-          </div>
-        )}
-      </div>
-
-      {/* —— Desktop shell (side-by-side only from md and up) —— */}
-      <div className="hidden h-full w-full overflow-hidden md:flex md:flex-row">
-        <div className="h-full w-[400px] flex-shrink-0 overflow-hidden border-r border-slate-800">
-          <ControlPanel {...controlPanelProps} />
+          {activeMobileTab === 'edit' ? (
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <ControlPanel
+                {...controlPanelProps}
+                stackAllSections
+                hideBrandChrome
+              />
+            </div>
+          ) : (
+            <div className="flex flex-1 w-full flex-col items-center overflow-x-hidden overflow-y-auto p-4">
+              <PaperSheet
+                key={`${sheetKey}-mobile`}
+                {...paperSheetProps}
+                fitMobileViewport
+              />
+            </div>
+          )}
         </div>
-        <div className="h-full flex-grow overflow-y-auto">
-          <PaperSheet key={`${sheetKey}-desktop`} {...paperSheetProps} />
+      ) : (
+        /* —— Desktop shell (side-by-side) —— */
+        <div className="flex h-full w-full flex-row overflow-hidden">
+          <div className="h-full w-[400px] flex-shrink-0 overflow-hidden border-r border-slate-800">
+            <ControlPanel {...controlPanelProps} />
+          </div>
+          <div className="h-full flex-grow overflow-y-auto">
+            <PaperSheet key={`${sheetKey}-desktop`} {...paperSheetProps} />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import {
 } from './sourceApp';
 import type { BillingTier } from './billing';
 import { getPaymentReceipt, type PaymentReceipt } from './paymentGateway';
+import { allowMockPayments } from './security/runtimeMode';
 import {
   isValidIndianMobile,
   validateLeadFields,
@@ -273,8 +274,9 @@ export function syncLocalPaymentStatus(
     console.warn('[NakalAI] Could not update local leads log payment:', err);
   }
 
-  // Best-effort remote sync when Supabase is configured
-  if (isSupabaseConfigured && updatedProfile) {
+  // Dev-only remote sync — production payment_status must be written server-side
+  // after Razorpay signature verification (never from the browser anon client).
+  if (allowMockPayments() && isSupabaseConfigured && updatedProfile) {
     void supabase
       .from('student_profiles')
       .update({

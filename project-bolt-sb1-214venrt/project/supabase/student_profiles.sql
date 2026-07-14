@@ -86,14 +86,9 @@ create policy "anon_insert_student_profiles"
     and mobile_number ~ '^[6-9][0-9]{9}$'
   );
 
--- Allow anon to update their own conversion stamp (matched by email + mobile + app)
+-- Payment conversion is server-written only (see student_profiles_rls_hardening.sql).
+-- Do NOT grant anon UPDATE on payment_status — browsers must not stamp paid rows.
 drop policy if exists "anon_update_payment_status" on public.student_profiles;
-create policy "anon_update_payment_status"
-  on public.student_profiles
-  for update
-  to anon
-  using (true)
-  with check (payment_status in ('unpaid', 'paid'));
 
 drop policy if exists "authenticated_read_student_profiles" on public.student_profiles;
 create policy "authenticated_read_student_profiles"

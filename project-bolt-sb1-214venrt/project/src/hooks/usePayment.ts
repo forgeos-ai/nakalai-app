@@ -1,8 +1,5 @@
 /**
- * Additive premium checkout hook — mock Razorpay/Stripe lifecycle +
- * Supabase `user_subscriptions` ledger upsert.
- *
- * Does not touch canvas / typography rendering.
+ * Premium checkout hook — dev mock path + production Razorpay verification.
  */
 
 import { useCallback, useState } from 'react';
@@ -20,6 +17,10 @@ import {
   type PricingTier,
 } from '../billing';
 import { syncLocalPaymentStatus, getStudentProfile } from '../studentProfile';
+import { allowMockPayments } from '../security/runtimeMode';
+import { fingerprintAssignment } from '../security/contentFingerprint';
+import { setServerEntitlement } from '../security/serverEntitlement';
+import { openRazorpayCheckout } from '../security/razorpayCheckout';
 
 const GATEWAY_DELAY_MS = 1500;
 
@@ -35,7 +36,6 @@ export type PremiumCheckoutResult = {
 export type UsePaymentOptions = {
   hasMatchedStyle: boolean;
   layoutPageCount?: number;
-  /** Explicit tier selected in the page-bundle matrix. */
   selectedTier?: PricingTier | null;
   onPaid?: (
     receipt: PaymentReceipt,
@@ -44,10 +44,6 @@ export type UsePaymentOptions = {
   ) => void;
 };
 
-/**
- * Resolve a stable user id for the subscriptions ledger.
- * Prefers captured lead email; falls back to a local anonymous id.
- */
 export function resolveCheckoutUserId(): string {
   const profile = getStudentProfile();
   if (profile?.email) return profile.email.trim().toLowerCase();
@@ -68,12 +64,16 @@ export function resolveCheckoutUserId(): string {
 }
 
 /**
- * Upsert premium access into Supabase `user_subscriptions`.
- * Soft-fails when Supabase is unconfigured (local demo still unlocks).
+ * Dev-only ledger upsert. Production premium access must be written server-side
+ * after Razorpay signature verification (service role).
  */
 export async function upsertPremiumSubscription(
   userId: string,
 ): Promise<{ ok: boolean; error?: string }> {
+  if (!allowMockPayments()) {
+    return { ok: true };
+  }
+
   if (!isSupabaseConfigured) {
     if (import.meta.env.DEV) {
       console.info(
@@ -106,16 +106,125 @@ export async function upsertPremiumSubscription(
   }
 }
 
-/**
- * Mock payment gate — simulates Razorpay/Stripe checkout for a selected page bundle.
- * Prefer passing `activation` from the Pay CTA (`id`, `priceINR`, `pageCount`).
- */
+async function initiateProductionCheckout(
+  activation: CheckoutActivationPayload,
+  quote: CheckoutQuote,
+  layoutPageCount: number,
+  assignmentText: string,
+  userId: string,
+): Promise<PremiumCheckoutResult> {
+  const contentHash = await fingerprintAssignment(
+    assignmentText,
+    layoutPageCount,
+    activation.id,
+  );
+
+  const orderRes = await fetch('/api/payments/create-order', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      packageId: activation.id,
+      contentHash,
+    }),
+    cache: 'no-store',
+  });
+
+  const orderData = (await orderRes.json().catch(() => ({}))) as {
+    ok?: boolean;
+    orderId?: string;
+    keyId?: string;
+    amountPaise?: number;
+    error?: string;
+  };
+
+  if (!orderRes.ok || !orderData.ok || !orderData.orderId || !orderData.keyId) {
+    return {
+      ok: false,
+      receipt: null,
+      quote,
+      activation,
+      ledgerSynced: false,
+      error: orderData.error ?? 'Payment gateway is not available.',
+    };
+  }
+
+  const razorpayResponse = await openRazorpayCheckout({
+    keyId: orderData.keyId,
+    orderId: orderData.orderId,
+    amountPaise: orderData.amountPaise ?? Math.round(quote.amountInr * 100),
+    description: quote.ctaLabel,
+  });
+
+  const verifyRes = await fetch('/api/payments/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      razorpay_order_id: razorpayResponse.razorpay_order_id,
+      razorpay_payment_id: razorpayResponse.razorpay_payment_id,
+      razorpay_signature: razorpayResponse.razorpay_signature,
+      packageId: activation.id,
+      contentHash,
+      userId,
+      email: getStudentProfile()?.email,
+      mobileNumber: getStudentProfile()?.mobileNumber,
+    }),
+    cache: 'no-store',
+  });
+
+  const verifyData = (await verifyRes.json().catch(() => ({}))) as {
+    ok?: boolean;
+    paymentVerificationToken?: string;
+    maxPages?: number;
+    error?: string;
+  };
+
+  if (!verifyRes.ok || !verifyData.ok || !verifyData.paymentVerificationToken) {
+    return {
+      ok: false,
+      receipt: null,
+      quote,
+      activation,
+      ledgerSynced: false,
+      error: verifyData.error ?? 'Payment verification failed.',
+    };
+  }
+
+  const expiresAt = Date.now() + (verifyData.maxPages ? 5 * 60 * 1000 : 5 * 60 * 1000);
+  setServerEntitlement({
+    paid: true,
+    paymentVerificationToken: verifyData.paymentVerificationToken,
+    packageId: activation.id,
+    contentHash,
+    maxPages: verifyData.maxPages ?? activation.pageCount,
+    expiresAt,
+  });
+
+  const receipt: PaymentReceipt = {
+    payment_status: 'paid',
+    tier_type: quote.tier_type,
+    amount_inr: quote.amountInr,
+    paid_at: new Date().toISOString(),
+    source_app: 'nakalai',
+  };
+
+  syncLocalPaymentStatus(true, receipt);
+
+  return {
+    ok: true,
+    receipt,
+    quote,
+    activation,
+    ledgerSynced: true,
+  };
+}
+
 export async function initiatePremiumCheckout(
   userId: string,
   hasMatchedStyle = true,
   layoutPageCount = 1,
   selectedTier?: PricingTier | null,
   activationOverride?: CheckoutActivationPayload | null,
+  assignmentText = '',
 ): Promise<PremiumCheckoutResult> {
   const tier =
     selectedTier ?? resolveDefaultTier(hasMatchedStyle, layoutPageCount);
@@ -123,6 +232,16 @@ export async function initiatePremiumCheckout(
     activationOverride ??
     toCheckoutActivationPayload(tier, layoutPageCount);
   const quote = quoteFromTier(tier);
+
+  if (!allowMockPayments()) {
+    return initiateProductionCheckout(
+      activation,
+      quote,
+      layoutPageCount,
+      assignmentText,
+      userId,
+    );
+  }
 
   if (import.meta.env.DEV) {
     console.info('[NakalAI] checkout activation', activation);
@@ -146,9 +265,6 @@ export async function initiatePremiumCheckout(
   };
 }
 
-/**
- * React hook wrapping the mock premium checkout lifecycle.
- */
 export function usePayment({
   hasMatchedStyle,
   layoutPageCount = 1,
@@ -165,6 +281,7 @@ export function usePayment({
     async (
       userIdOverride?: string,
       activationOverride?: CheckoutActivationPayload | null,
+      assignmentText = '',
     ) => {
       if (isProcessingPayment) return null;
 
@@ -180,6 +297,7 @@ export function usePayment({
           layoutPageCount,
           selectedTier,
           activationOverride,
+          assignmentText,
         );
         setLastResult(result);
 

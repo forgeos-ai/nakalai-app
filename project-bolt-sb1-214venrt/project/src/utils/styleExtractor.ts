@@ -38,6 +38,14 @@ export type ExtractedNotebookStyle = {
   strokeThickness: number;
   /** Continuous ink connectivity [0, 1] — high = cursive, low = print. */
   connectivityRatio: number;
+  /** Structural confidence from ink density and measurable stroke continuity. */
+  confidence: number;
+  /** Mean horizontal dark runs per ink-bearing row. */
+  avgRunsPerRow: number;
+  /** Fraction of ink columns with continuous multi-row strokes. */
+  verticalContinuity: number;
+  /** Run-width proxy for narrow vs broad glyph construction. */
+  relativeRunWidth: number;
   /** How many dark ink pixels contributed to the cluster */
   inkSampleCount: number;
   /** True when analysis used the safe gel-pen fallback matrix */
@@ -113,6 +121,10 @@ export function createFallbackNotebookStyle(
     fontFamily: 'Architects Daughter',
     strokeThickness: 2.5,
     connectivityRatio: 0.45,
+    confidence: 0,
+    avgRunsPerRow: 5.5,
+    verticalContinuity: 0.38,
+    relativeRunWidth: 0.45,
     inkSampleCount: 0,
     usedFallback: true,
   };
@@ -406,6 +418,7 @@ export const GOOGLE_FONT_NAME: Record<HandwritingFontClass, string> = {
   'rushed-student': 'Shadows Into Light',
   'slant-dash': 'Covered By Your Grace',
   'marker-bold': 'Permanent Marker',
+  'matched-custom-upload': 'Great Vibes',
 };
 
 /** Resolve registry id → exact Google Font family name for canvas/CSS. */
@@ -598,16 +611,18 @@ export function classifyHandwritingFont(
   fontClass: HandwritingFontClass;
   fontFamily: string;
 } {
-  console.log('Raw Extracted Metrics:', {
-    connectivity: structure.connectivityRatio,
-    strokeThickness: structure.strokeThickness,
-    noiseIntensity,
-    avgRunsPerRow: structure.avgRunsPerRow,
-    verticalContinuity: structure.verticalContinuity,
-    relativeRunWidth: structure.relativeRunWidth,
-    slantDegrees,
-    hasLowercase,
-  });
+  if (import.meta.env.DEV) {
+    console.info('Raw Extracted Metrics:', {
+      connectivity: structure.connectivityRatio,
+      strokeThickness: structure.strokeThickness,
+      noiseIntensity,
+      avgRunsPerRow: structure.avgRunsPerRow,
+      verticalContinuity: structure.verticalContinuity,
+      relativeRunWidth: structure.relativeRunWidth,
+      slantDegrees,
+      hasLowercase,
+    });
+  }
 
   const fontCategory = classifyStructuralTag(
     structure,
@@ -623,11 +638,13 @@ export function classifyHandwritingFont(
   );
   const fontFamily = GOOGLE_FONT_NAME[fontClass];
 
-  console.log('Classified handwriting profile:', {
-    fontCategory,
-    fontClass,
-    fontFamily,
-  });
+  if (import.meta.env.DEV) {
+    console.info('Classified handwriting profile:', {
+      fontCategory,
+      fontClass,
+      fontFamily,
+    });
+  }
 
   return { fontCategory, fontClass, fontFamily };
 }
@@ -641,6 +658,12 @@ export function inputHasLowercase(text: string | undefined | null): boolean {
 export type StyleExtractOptions = {
   /** Assignment text — lowercase letters block all-caps font lock-in. */
   inputText?: string;
+  /** Optional blob URL tracker for session revoke. */
+  trackObjectUrl?: (url: string) => string;
+  untrackObjectUrl?: (url: string) => void;
+  /** Pipeline extract token — stale jobs must not resolve useful data. */
+  extractToken?: number;
+  isTokenLive?: (token: number) => boolean;
 };
 
 export function extractNotebookStyle(
@@ -648,20 +671,44 @@ export function extractNotebookStyle(
   options: StyleExtractOptions = {},
 ): Promise<ExtractedNotebookStyle> {
   return new Promise((resolve) => {
+    const tokenLive = () =>
+      options.extractToken == null ||
+      options.isTokenLive?.(options.extractToken) !== false;
+
+    if (!tokenLive()) {
+      resolve(createFallbackNotebookStyle('stale-token-preflight'));
+      return;
+    }
+
     if (!isLikelyImageFile(file)) {
       resolve(createFallbackNotebookStyle('not-an-image'));
       return;
     }
 
     const hasLowercase = inputHasLowercase(options.inputText);
-    const url = URL.createObjectURL(file);
+    let url = URL.createObjectURL(file);
+    if (options.trackObjectUrl) {
+      url = options.trackObjectUrl(url);
+    }
     const img = new Image();
 
     const cleanup = () => {
       try {
+        img.onload = null;
+        img.onerror = null;
+        img.src = '';
+      } catch {
+        /* ignore */
+      }
+      try {
         URL.revokeObjectURL(url);
       } catch {
         // ignore
+      }
+      try {
+        options.untrackObjectUrl?.(url);
+      } catch {
+        /* ignore */
       }
     };
 
@@ -670,7 +717,20 @@ export function extractNotebookStyle(
       resolve(createFallbackNotebookStyle(reason));
     };
 
+    const finishOk = (style: ExtractedNotebookStyle) => {
+      cleanup();
+      if (!tokenLive()) {
+        resolve(createFallbackNotebookStyle('stale-token-post'));
+        return;
+      }
+      resolve(style);
+    };
+
     const runPixelAnalysis = () => {
+      if (!tokenLive()) {
+        finishFallback('stale-token-analysis');
+        return;
+      }
       try {
         const naturalW = img.naturalWidth || img.width;
         const naturalH = img.naturalHeight || img.height;
@@ -709,6 +769,10 @@ export function extractNotebookStyle(
           return;
         }
 
+        // Drop oversized canvas ASAP — reduce leak across hundreds of uploads
+        canvas.width = 0;
+        canvas.height = 0;
+
         const { data } = imageData;
         const roiW = imageData.width;
         const roiH = imageData.height;
@@ -727,6 +791,36 @@ export function extractNotebookStyle(
         );
         const noiseIntensity = extractNoiseIntensity(data, roiW, roiH);
         const structure = extractStrokeStructure(ink.inkMask, roiW, roiH);
+        const inkDensity = ink.inkCount / Math.max(1, roiW * roiH);
+        const sampleConfidence = clamp(
+          (ink.inkCount - MIN_INK_SAMPLES) / 2400,
+          0,
+          1,
+        );
+        const densityConfidence = clamp(
+          inkDensity < 0.012
+            ? inkDensity / 0.012
+            : inkDensity > 0.42
+              ? (0.62 - inkDensity) / 0.2
+              : 1,
+          0,
+          1,
+        );
+        const structureConfidence = clamp(
+          0.35 +
+            structure.verticalContinuity * 0.3 +
+            Math.min(1, structure.avgRunsPerRow / 4) * 0.2 +
+            Math.min(1, structure.strokeThickness / 2) * 0.15,
+          0,
+          1,
+        );
+        const confidence = clamp(
+          sampleConfidence * 0.5 +
+            densityConfidence * 0.25 +
+            structureConfidence * 0.25,
+          0,
+          1,
+        );
         const { fontCategory, fontClass, fontFamily } = classifyHandwritingFont(
           structure,
           noiseIntensity,
@@ -734,8 +828,12 @@ export function extractNotebookStyle(
           hasLowercase,
         );
 
-        cleanup();
-        resolve({
+        if (!tokenLive()) {
+          finishFallback('stale-token-resolve');
+          return;
+        }
+
+        finishOk({
           inkHex: ink.inkHex,
           slantDegrees: Math.round(slantDegrees * 10) / 10,
           noiseIntensity: Math.round(noiseIntensity * 1000) / 1000,
@@ -745,6 +843,12 @@ export function extractNotebookStyle(
           strokeThickness: Math.round(structure.strokeThickness * 100) / 100,
           connectivityRatio:
             Math.round(structure.connectivityRatio * 1000) / 1000,
+          confidence: Math.round(confidence * 1000) / 1000,
+          avgRunsPerRow: Math.round(structure.avgRunsPerRow * 100) / 100,
+          verticalContinuity:
+            Math.round(structure.verticalContinuity * 1000) / 1000,
+          relativeRunWidth:
+            Math.round(structure.relativeRunWidth * 1000) / 1000,
           inkSampleCount: ink.inkCount,
           usedFallback: false,
         });
@@ -755,6 +859,10 @@ export function extractNotebookStyle(
     };
 
     img.onload = () => {
+      if (!tokenLive()) {
+        finishFallback('stale-token-onload');
+        return;
+      }
       if (typeof img.decode === 'function') {
         img
           .decode()
@@ -772,3 +880,4 @@ export function extractNotebookStyle(
     img.src = url;
   });
 }
+

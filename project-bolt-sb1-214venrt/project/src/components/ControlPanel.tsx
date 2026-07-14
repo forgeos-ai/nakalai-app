@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { INK_COLORS, PAPER_TYPES, getFontStyleByClass, MATCHED_PROXY_FONT_ID } from '../constants';
+import { INK_COLORS, PAPER_TYPES } from '../constants';
 import type { InkColor, PaperType, FontStyle } from '../constants';
 import {
   PenLine,
@@ -19,6 +19,7 @@ import {
   FALLBACK_FONT_CLASS,
   STYLE_EXTRACT_ERROR,
 } from '../utils/styleExtractor';
+import { matchedOverridesFromProfile } from '../handwriting';
 import {
   buildCustomStyleMapFromFile,
   setCustomStyleSampleText,
@@ -71,7 +72,7 @@ type ControlPanelProps = {
   onPaymentSuccess?: (
     receipt: PaymentReceipt,
     quote: CheckoutQuote,
-    activation: CheckoutActivationPayload,
+    activation?: CheckoutActivationPayload,
   ) => void;
   /**
    * Mobile Edit Text shell — show Text + Style + Look together (no section tabs).
@@ -119,7 +120,6 @@ export default function ControlPanel({
   onInkColorChange,
   paperType,
   onPaperTypeChange,
-  fontStyle,
   isPaid,
   matchedStyle = null,
   onMatchedStyleChange,
@@ -139,6 +139,7 @@ export default function ControlPanel({
   const [isPdfDragOver, setIsPdfDragOver] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const styleInputRef = useRef<HTMLInputElement>(null);
+  const styleUploadGenRef = useRef(0);
   const [isAnalyzingStyle, setIsAnalyzingStyle] = useState(false);
   const [styleError, setStyleError] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('text');
@@ -217,6 +218,8 @@ export default function ControlPanel({
     const pdfMod = await import('../extractPdfText');
     try {
       file = pdfMod.assertSinglePdfFile(list);
+      const { validatePdfUpload } = await import('../security/fileValidation');
+      await validatePdfUpload(file);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : pdfMod.PDF_SINGLE_FILE_MESSAGE;
@@ -289,13 +292,29 @@ export default function ControlPanel({
     }
     setIsExporting(true);
     setClientGuardWarning(null);
-    // Let React paint the overlay before heavy canvas work begins
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
     try {
+      const { fingerprintAssignment } = await import('../security/contentFingerprint');
+      const { authorizeExport } = await import('../security/downloadAuthorization');
+      const contentHash = await fingerprintAssignment(
+        text,
+        layoutPageCount,
+        selectedPackageId,
+      );
+      const auth = await authorizeExport({
+        mode,
+        contentHash,
+        layoutPageCount,
+        packageId: selectedPackageId,
+      });
       const { exportAssignmentPdf } = await import('../exportPdf');
-      await exportAssignmentPdf({ mode });
+      await exportAssignmentPdf({
+        mode,
+        maxPages: auth.maxPages,
+        skipWatermark: auth.skipWatermark,
+      });
     } catch (err) {
       console.error('PDF export failed:', err);
       const message =
@@ -369,14 +388,11 @@ export default function ControlPanel({
           setShowLeadModal(true);
           return;
         }
-        const result = await initiatePremiumCheckout(undefined, activation);
+        const result = await initiatePremiumCheckout(undefined, activation, text);
         if (result?.ok) {
           proceedToDownload('paid');
         } else if (result?.error) {
-          window.alert(
-            `Payment recorded locally, but ledger sync failed: ${result.error}`,
-          );
-          proceedToDownload('paid');
+          window.alert(`Payment could not complete: ${result.error}`);
         }
         return;
       }
@@ -396,37 +412,45 @@ export default function ControlPanel({
   };
 
   const handleStylePhoto = async (file: File | undefined) => {
-    if (!file || isAnalyzingStyle || !onMatchedStyleChange) return;
+    if (!file || !onMatchedStyleChange) return;
 
-    if (!file.type.startsWith('image/')) {
-      setStyleError('Please upload a character sheet image (PNG or JPEG).');
+    try {
+      const { validateImageUpload } = await import('../security/fileValidation');
+      await validateImageUpload(file);
+    } catch (err) {
+      setStyleError(
+        err instanceof Error ? err.message : 'Please upload a character sheet image (PNG or JPEG).',
+      );
       if (styleInputRef.current) styleInputRef.current.value = '';
       return;
     }
 
     setStyleError(null);
     setIsAnalyzingStyle(true);
+    const uploadGen = ++styleUploadGenRef.current;
 
     try {
       setCustomStyleSampleText(text);
-      const patchResult = await buildCustomStyleMapFromFile(file, text);
-      const matchedLayout = getFontStyleByClass(MATCHED_PROXY_FONT_ID);
+      // Fresh pipeline session — Nth upload ≡ first upload (cancels prior jobs)
+      const { profile, committed } = await buildCustomStyleMapFromFile(
+        file,
+        text,
+      );
 
-      onMatchedStyleChange({
-        inkHex: INK_COLORS[0].hex,
-        slantDegrees: matchedLayout.layout.slantDegrees,
-        noiseIntensity: 0.12,
-        fontCategory: matchedLayout.bucket,
-        fontClass: MATCHED_PROXY_FONT_ID,
-      });
+      // Superseded by a newer upload — do not clobber UI / profile
+      if (!committed || uploadGen !== styleUploadGenRef.current) return;
+
+      onMatchedStyleChange(matchedOverridesFromProfile(profile));
 
       console.info(
-        '[NakalAI] Character patch matrix ready:',
-        patchResult.patchCount,
-        'cells',
+        '[NakalAI] Handwriting profile ready:',
+        profile.fontClass,
+        profile.fontFamily,
+        `seed=${profile.seed}`,
       );
       setStyleError(null);
     } catch (err) {
+      if (uploadGen !== styleUploadGenRef.current) return;
       console.error('Style upload failed:', err);
       onMatchedStyleChange({
         inkHex: FALLBACK_INK_HEX,
@@ -439,8 +463,10 @@ export default function ControlPanel({
         err instanceof Error ? err.message : STYLE_EXTRACT_ERROR,
       );
     } finally {
-      setIsAnalyzingStyle(false);
-      if (styleInputRef.current) styleInputRef.current.value = '';
+      if (uploadGen === styleUploadGenRef.current) {
+        setIsAnalyzingStyle(false);
+        if (styleInputRef.current) styleInputRef.current.value = '';
+      }
     }
   };
 
@@ -453,6 +479,7 @@ export default function ControlPanel({
         hasMatchedStyle={Boolean(matchedStyle)}
         packageId={selectedPackageId}
         layoutPageCount={layoutPageCount}
+        assignmentText={text}
         isPaid={isPaid}
         onPaymentSuccess={onPaymentSuccess}
       />

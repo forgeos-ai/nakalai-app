@@ -1,21 +1,41 @@
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { A4_WIDTH_MM, A4_HEIGHT_MM } from './pageGeometry';
+import { FREE_PAGE_CAP } from './clientGuards';
 
 const CAPTURE_SCALE = 2;
 const A4_PAGE_SELECTOR = '[data-a4-page]';
 
+export type ExportPdfOptions = {
+  mode?: 'free' | 'paid';
+  maxPages?: number;
+  skipWatermark?: boolean;
+};
+
 /**
- * Capture every rendered A4 page preview on screen and assemble a multi-page PDF.
- * Uses html2canvas at 2× scale for sharp print output, then downloads assignment.pdf.
+ * Capture rendered A4 page previews and assemble a multi-page PDF.
+ * Enforces server-authorized page caps — never exports beyond maxPages.
  */
-export async function exportAssignmentPdf(): Promise<void> {
+export async function exportAssignmentPdf(
+  options: ExportPdfOptions = {},
+): Promise<void> {
+  const mode = options.mode ?? 'free';
+  const maxPages =
+    options.maxPages ??
+    (mode === 'free' ? FREE_PAGE_CAP : Number.POSITIVE_INFINITY);
+  const skipWatermark = options.skipWatermark ?? mode === 'paid';
+
   const pageElements = Array.from(
     document.querySelectorAll<HTMLElement>(A4_PAGE_SELECTOR),
   );
 
   if (pageElements.length === 0) {
     throw new Error('No assignment pages found to export.');
+  }
+
+  const exportCount = Math.min(pageElements.length, maxPages);
+  if (exportCount < 1) {
+    throw new Error('No pages authorized for export.');
   }
 
   const pdf = new jsPDF({
@@ -25,10 +45,9 @@ export async function exportAssignmentPdf(): Promise<void> {
     compress: true,
   });
 
-  for (let i = 0; i < pageElements.length; i++) {
-    const el = pageElements[i];
+  for (let i = 0; i < exportCount; i++) {
+    const el = pageElements[i]!;
 
-    // Yield to the browser between pages so the UI stays responsive
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => resolve());
     });
@@ -39,7 +58,6 @@ export async function exportAssignmentPdf(): Promise<void> {
       allowTaint: true,
       backgroundColor: '#ffffff',
       logging: false,
-      // Capture the fixed A4 CSS box (same geometry as preview)
       width: el.offsetWidth,
       height: el.offsetHeight,
       windowWidth: el.offsetWidth,
@@ -48,9 +66,13 @@ export async function exportAssignmentPdf(): Promise<void> {
       scrollY: 0,
       x: 0,
       y: 0,
-      // Keep paid PDF pristine — skip preview watermark (and any marked nodes)
-      ignoreElements: (node) =>
-        node instanceof HTMLElement && node.hasAttribute('data-pdf-ignore'),
+      ignoreElements: (node) => {
+        if (!(node instanceof HTMLElement)) return false;
+        if (node.hasAttribute('data-pdf-ignore')) {
+          return skipWatermark;
+        }
+        return false;
+      },
     });
 
     const imgData = canvas.toDataURL('image/jpeg', 0.95);

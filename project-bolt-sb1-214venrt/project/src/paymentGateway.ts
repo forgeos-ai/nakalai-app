@@ -8,6 +8,12 @@ import {
   PAYMENT_STATUS_KEY,
   PAYMENT_RECEIPT_KEY,
 } from './sourceApp';
+import { allowMockPayments } from './security/runtimeMode';
+import {
+  clearServerEntitlement,
+  getServerEntitlement,
+  isServerEntitlementValidFor,
+} from './security/serverEntitlement';
 
 export { PAYMENT_STATUS_KEY, PAYMENT_RECEIPT_KEY };
 
@@ -20,15 +26,20 @@ export type PaymentReceipt = {
 };
 
 /**
- * Mock UPI payment receipt for local monetization testing.
- * When true, preview watermark is removed and clean PDF export is unlocked.
+ * Paid status for UI gating.
+ * Production: requires short-lived server-verified entitlement (never localStorage alone).
+ * Development: localStorage mock flag is permitted.
  */
 export function isMockPaymentPaid(): boolean {
-  try {
-    return localStorage.getItem(PAYMENT_STATUS_KEY) === 'true';
-  } catch {
-    return false;
+  if (allowMockPayments()) {
+    try {
+      return localStorage.getItem(PAYMENT_STATUS_KEY) === 'true';
+    } catch {
+      return false;
+    }
   }
+  const ent = getServerEntitlement();
+  return Boolean(ent?.paid && Date.now() < ent.expiresAt);
 }
 
 export function getPaymentReceipt(): PaymentReceipt | null {
@@ -42,6 +53,7 @@ export function getPaymentReceipt(): PaymentReceipt | null {
 }
 
 function writePaymentReceipt(receipt: PaymentReceipt): void {
+  if (!allowMockPayments()) return;
   try {
     localStorage.setItem(PAYMENT_RECEIPT_KEY, JSON.stringify(receipt));
     if (receipt.payment_status === 'paid') {
@@ -56,7 +68,7 @@ function writePaymentReceipt(receipt: PaymentReceipt): void {
 
 /**
  * Initialize / complete a mock UPI payment with dynamic tier pricing.
- * Persists tier_type + amount for analytics (localStorage + profile sync).
+ * Dev-only — production unlocks require Razorpay verification.
  */
 export function completeMockPayment(quote: CheckoutQuote): PaymentReceipt {
   const receipt: PaymentReceipt = {
@@ -70,7 +82,9 @@ export function completeMockPayment(quote: CheckoutQuote): PaymentReceipt {
   return receipt;
 }
 
-export function clearMockPayment(hasMatchedStyle: boolean): PaymentReceipt {
+export function clearMockPayment(
+  hasMatchedStyle: boolean | string,
+): PaymentReceipt {
   const quote = getCheckoutQuote(hasMatchedStyle);
   const receipt: PaymentReceipt = {
     payment_status: 'unpaid',
@@ -80,22 +94,25 @@ export function clearMockPayment(hasMatchedStyle: boolean): PaymentReceipt {
     source_app: SOURCE_APP,
   };
   writePaymentReceipt(receipt);
+  clearServerEntitlement();
   return receipt;
 }
 
 /**
- * Pay-per-download lock: content mutation (textarea edit / new PDF) voids
- * the current paid pass — clears receipt tokens and returns unpaid.
- * Idempotent when already unpaid.
+ * Pay-per-download lock: content mutation voids the current paid pass.
  */
 export function invalidatePaidSessionForContentChange(
   hasMatchedStyle: boolean,
 ): PaymentReceipt | null {
-  if (!isMockPaymentPaid()) return null;
+  const wasPaid = isMockPaymentPaid();
+  if (!wasPaid) return null;
 
   try {
-    localStorage.removeItem(PAYMENT_STATUS_KEY);
-    localStorage.removeItem(PAYMENT_RECEIPT_KEY);
+    if (allowMockPayments()) {
+      localStorage.removeItem(PAYMENT_STATUS_KEY);
+      localStorage.removeItem(PAYMENT_RECEIPT_KEY);
+    }
+    clearServerEntitlement();
   } catch {
     // ignore
   }
@@ -103,13 +120,17 @@ export function invalidatePaidSessionForContentChange(
   return clearMockPayment(hasMatchedStyle);
 }
 
-/** Toggle paid/unpaid using the live checkout quote (standard vs premium). */
-export function toggleMockPayment(hasMatchedStyle: boolean): {
+/** Toggle paid/unpaid — dev/mock builds only. */
+export function toggleMockPayment(hasMatchedStyle: boolean | string): {
   isPaid: boolean;
   receipt: PaymentReceipt;
   quote: CheckoutQuote;
 } {
   const quote = getCheckoutQuote(hasMatchedStyle);
+  if (!allowMockPayments()) {
+    const receipt = clearMockPayment(hasMatchedStyle);
+    return { isPaid: isServerEntitlementValidFor('', quote.packageId), receipt, quote };
+  }
   if (isMockPaymentPaid()) {
     const receipt = clearMockPayment(hasMatchedStyle);
     return { isPaid: false, receipt, quote };
@@ -120,6 +141,7 @@ export function toggleMockPayment(hasMatchedStyle: boolean): {
 
 /** @deprecated Prefer toggleMockPayment(hasMatchedStyle) */
 export function setMockPaymentPaid(paid: boolean): void {
+  if (!allowMockPayments()) return;
   if (paid) {
     completeMockPayment(getCheckoutQuote(false));
   } else {

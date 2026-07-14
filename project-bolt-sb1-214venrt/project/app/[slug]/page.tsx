@@ -1,11 +1,12 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import {
-  getAllSeoKeywordSlugs,
-  resolveSeoKeyword,
-} from '../../src/seo/resolveSeoKeyword';
-import { RESERVED_STATIC_SLUGS } from '../../src/seo/seoKeywords';
+  getAllLandingPageSlugs,
+  resolveLandingPage,
+  RESERVED_STATIC_SLUGS,
+} from '../../content/seo/landing-pages/registry';
 import { buildSeoMetadata } from '../../src/seo/generateMetadata';
+import { buildLandingPageJsonLd } from '../../content/seo/schemas/jsonLd';
 import SeoLandingView from '../../src/seo/SeoLandingView';
 
 type PageProps = {
@@ -13,14 +14,11 @@ type PageProps = {
 };
 
 /**
- * Programmatic SEO landing — App Router dynamic segment.
- *
- * - Known slugs → keyword matrix copy + preloaded canvas
- * - Unknown slugs → DEFAULT_SEO_KEYWORD (no crash / no hard 404)
- * - Reserved trust/blog slugs → notFound (handled by dedicated routes / static)
+ * Programmatic SEO — one dynamic route, 30+ config-driven landing pages.
+ * Add pages by appending a LandingPageConfig object to content/seo/landing-pages/.
  */
 export async function generateStaticParams() {
-  return getAllSeoKeywordSlugs().map((slug) => ({ slug }));
+  return getAllLandingPageSlugs().map((slug) => ({ slug }));
 }
 
 export async function generateMetadata({
@@ -40,6 +38,16 @@ export default async function SeoKeywordPage({ params }: PageProps) {
     notFound();
   }
 
-  const config = resolveSeoKeyword(slug);
-  return <SeoLandingView config={config} />;
+  const config = resolveLandingPage(slug);
+  const jsonLd = buildLandingPageJsonLd(config);
+
+  return (
+    <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+      <SeoLandingView config={config} />
+    </>
+  );
 }

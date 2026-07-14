@@ -244,6 +244,8 @@ export default function A4Page({
           matchedFontFamily={matchedFontFamily}
           fontSizePx={fontSizePx}
           paintRevision={paintRevision}
+          matchedStyle={matchedStyle}
+          pageNumber={pageNumber}
           layout={{
             ...layout,
             slantDegrees: isDisconnectedPrintStyle(

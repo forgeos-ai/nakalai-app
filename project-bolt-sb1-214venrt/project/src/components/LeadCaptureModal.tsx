@@ -23,6 +23,8 @@ type LeadCaptureModalProps = {
   /** Selected package id — preferred over hasMatchedStyle for checkout quote. */
   packageId?: string;
   layoutPageCount?: number;
+  /** Binds verified payments to the current assignment text. */
+  assignmentText?: string;
   /** Already unlocked — skip gateway, profile-only gate. */
   isPaid?: boolean;
   /** Fired after mock gateway + ledger upsert unlocks download. */
@@ -69,6 +71,7 @@ export default function LeadCaptureModal({
   hasMatchedStyle = false,
   packageId,
   layoutPageCount = 1,
+  assignmentText = '',
   isPaid = false,
   onPaymentSuccess,
 }: LeadCaptureModalProps) {
@@ -152,7 +155,7 @@ export default function LeadCaptureModal({
       const userId = profile.email.trim().toLowerCase();
 
       if (!isPaid) {
-        const result = await initiatePremiumCheckout(userId);
+        const result = await initiatePremiumCheckout(userId, undefined, assignmentText);
         if (!result?.ok && result?.error) {
           setErrors({
             form: `Payment could not complete: ${result.error}`,

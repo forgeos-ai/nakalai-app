@@ -1,4 +1,5 @@
 import * as pdfjs from 'pdfjs-dist';
+import { assertPdfSize } from './security/fileValidation';
 
 /** User-facing message for encrypted / scanned / empty-text PDFs. */
 export const PDF_EXTRACT_FALLBACK_MESSAGE =
@@ -11,11 +12,38 @@ export const PDF_SINGLE_FILE_MESSAGE =
 /**
  * Absolute CDN worker — relative Vite/`node_modules` worker URLs fail mobile
  * cross-origin / isolation checks. pdf.js 5+/6 ship ESM workers as `.min.mjs`
- * on cdnjs (matched to `pdfjs.version`).
+ * on cdnjs (matched to `pdfjs.version`). Skipped entirely on iOS (see below).
  */
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
 
 const MIN_MEANINGFUL_CHARS = 8;
+
+/** iPhone / iPad Safari (incl. desktop-class iPad) — Web Workers crash PDF parse. */
+function isIosViewport(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod/i.test(ua)) return true;
+  // iPadOS 13+ may report as Mac with touch
+  return (
+    navigator.platform === 'MacIntel' &&
+    typeof navigator.maxTouchPoints === 'number' &&
+    navigator.maxTouchPoints > 1
+  );
+}
+
+/**
+ * Bind WorkerMessageHandler on the main thread so pdf.js uses its fake-worker
+ * path (no dedicated Worker). Equivalent to legacy `disableWorker: true`.
+ */
+async function bindMainThreadPdfWorker(): Promise<void> {
+  const g = globalThis as typeof globalThis & {
+    pdfjsWorker?: { WorkerMessageHandler?: unknown };
+  };
+  if (g.pdfjsWorker?.WorkerMessageHandler) return;
+
+  const workerMod = await import('pdfjs-dist/build/pdf.worker.min.mjs');
+  g.pdfjsWorker = workerMod as { WorkerMessageHandler?: unknown };
+}
 
 /**
  * Mobile file pickers often omit or rewrite MIME types — accept by
@@ -51,6 +79,7 @@ export function assertSinglePdfFile(
     throw new Error(PDF_EXTRACT_FALLBACK_MESSAGE);
   }
 
+  assertPdfSize(file);
   return file;
 }
 
@@ -62,16 +91,36 @@ function normalizeExtractedText(raw: string): string {
     .trim();
 }
 
-type PdfDocument = Awaited<
-  ReturnType<ReturnType<typeof pdfjs.getDocument>['promise']>
->;
+type PdfDocument = Awaited<ReturnType<typeof pdfjs.getDocument>['promise']>;
 
 /**
- * Load PDF via CDN worker. On worker spin-up failure, surface a soft error
- * so ControlPanel can keep the canvas UI alive (no hard crash).
+ * Load PDF. Non-iOS uses the CDN worker; iOS runs inline on the main UI
+ * thread (`disableWorker: true` + main-thread WorkerMessageHandler) so Safari
+ * never hits thread-isolation Worker crashes. Text extraction results match.
  */
 async function loadPdfDocument(data: Uint8Array): Promise<PdfDocument> {
   try {
+    const arrayBuffer = data.buffer.slice(
+      data.byteOffset,
+      data.byteOffset + data.byteLength,
+    );
+
+    if (isIosViewport()) {
+      await bindMainThreadPdfWorker();
+      // disableWorker is legacy; pdf.js 6 ignores unknown keys but we pass it
+      // explicitly and force main-thread parsing via pdfjsWorker above.
+      const loadingTask = pdfjs.getDocument({
+        data: arrayBuffer,
+        disableWorker: true,
+        useSystemFonts: true,
+        disableFontFace: false,
+        password: '',
+      } as Parameters<typeof pdfjs.getDocument>[0] & {
+        disableWorker?: boolean;
+      });
+      return await loadingTask.promise;
+    }
+
     return await pdfjs.getDocument({
       data,
       useSystemFonts: true,
