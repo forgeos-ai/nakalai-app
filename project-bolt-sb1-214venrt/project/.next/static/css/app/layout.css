@@ -784,6 +784,9 @@ video {
 .w-2\/5{
   width: 40%;
 }
+.w-\[400px\]{
+  width: 400px;
+}
 .min-w-0{
   min-width: 0px;
 }
@@ -805,11 +808,17 @@ video {
 .flex-1{
   flex: 1 1 0%;
 }
+.flex-shrink-0{
+  flex-shrink: 0;
+}
 .shrink-0{
   flex-shrink: 0;
 }
 .shrink{
   flex-shrink: 1;
+}
+.flex-grow{
+  flex-grow: 1;
 }
 .origin-top{
   transform-origin: top;
@@ -873,6 +882,9 @@ video {
 }
 .items-baseline{
   align-items: baseline;
+}
+.items-stretch{
+  align-items: stretch;
 }
 .justify-center{
   justify-content: center;

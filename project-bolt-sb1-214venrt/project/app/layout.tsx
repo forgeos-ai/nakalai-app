@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
 import AnalyticsBoot from '../src/seo/AnalyticsBoot';
 import '../src/index.css';
@@ -16,10 +16,17 @@ export const metadata: Metadata = {
   },
 };
 
+/** Required so phones report real CSS px width — otherwise md: desktop shell shows on mobile. */
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+};
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>
+      <body className="h-screen w-full overflow-hidden bg-slate-900">
         <AnalyticsBoot />
         {children}
       </body>

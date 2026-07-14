@@ -53,7 +53,7 @@ export default function PaperSheet({
 
   if (fitMobileViewport) {
     return (
-      <>
+      <div className="flex w-full max-w-md flex-col items-stretch gap-4">
         <MockPaymentToggle
           isPaid={isPaid}
           onToggle={onTogglePayment}
@@ -62,7 +62,7 @@ export default function PaperSheet({
         />
 
         {matchedStyle && !isPaid && (
-          <p className="mb-2 w-full max-w-full text-center text-xs text-amber-800/90">
+          <p className="w-full text-center text-xs text-amber-800/90">
             Matched style preview active — {checkoutQuote.ctaLabel}
           </p>
         )}
@@ -70,22 +70,20 @@ export default function PaperSheet({
         {pages.map((page) => (
           <div
             key={`mobile-shell-${page.pageNumber}-${paperType.id}-${family}-${paintRevision}`}
-            className="flex w-full max-w-full justify-center overflow-hidden"
+            className="w-full max-w-md overflow-hidden rounded-lg bg-white shadow-sm"
           >
-            <div className="h-auto w-full max-w-full overflow-hidden object-contain">
-              <A4Page
-                segments={page.segments}
-                pageNumber={page.pageNumber}
-                inkColor={inkColor}
-                paperType={paperType}
-                fontStyle={fontStyle}
-                matchedFontFamily={family}
-                isPaid={isPaid}
-                matchedStyle={matchedStyle}
-                paintRevision={paintRevision}
-                fluidWidth
-              />
-            </div>
+            <A4Page
+              segments={page.segments}
+              pageNumber={page.pageNumber}
+              inkColor={inkColor}
+              paperType={paperType}
+              fontStyle={fontStyle}
+              matchedFontFamily={family}
+              isPaid={isPaid}
+              matchedStyle={matchedStyle}
+              paintRevision={paintRevision}
+              fluidWidth
+            />
           </div>
         ))}
 
@@ -95,10 +93,10 @@ export default function PaperSheet({
           </p>
         )}
 
-        <p className="w-full max-w-full pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 text-center text-xs font-medium text-slate-600">
+        <p className="w-full pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-1 text-center text-xs font-medium text-slate-600">
           {pages.length} page{pages.length !== 1 ? 's' : ''}
         </p>
-      </>
+      </div>
     );
   }
 

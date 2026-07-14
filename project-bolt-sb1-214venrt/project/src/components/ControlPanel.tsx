@@ -228,6 +228,16 @@ export default function ControlPanel({
       return;
     }
 
+    // Mobile MIME can be empty — re-check extension before ArrayBuffer work
+    const isPDF =
+      file.type === 'application/pdf' ||
+      file.name.toLowerCase().endsWith('.pdf');
+    if (!isPDF) {
+      setPdfExtractError(pdfMod.PDF_EXTRACT_FALLBACK_MESSAGE);
+      if (pdfInputRef.current) pdfInputRef.current.value = '';
+      return;
+    }
+
     setPdfExtractError(null);
     setIsExtractingPdf(true);
     // New PDF = new assignment — void any existing paid download pass

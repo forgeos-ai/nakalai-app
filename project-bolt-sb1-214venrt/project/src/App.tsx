@@ -252,7 +252,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
   } as const;
 
   const shellClass = embedded
-    ? 'h-full min-h-0 w-full overflow-hidden bg-slate-900 font-sans'
+    ? 'h-full w-full overflow-hidden bg-slate-900 font-sans'
     : 'h-screen w-full overflow-hidden bg-slate-900 font-sans';
 
   return (
@@ -263,8 +263,8 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
         <span className="nakalai-font-lock--print">AaBbCc</span>
       </div>
 
-      {/* —— Mobile shell (isolated; zero desktop impact) —— */}
-      <div className="flex h-[100dvh] w-full min-w-0 flex-col overflow-hidden md:hidden">
+      {/* —— Mobile shell (tabbed; never side-by-side) —— */}
+      <div className="flex h-[100dvh] w-full flex-col overflow-hidden md:hidden">
         <nav
           className="flex shrink-0 border-b border-slate-800 bg-slate-950/95 px-2 pt-[max(0.5rem,env(safe-area-inset-top))]"
           aria-label="Mobile workspace"
@@ -306,7 +306,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
             />
           </div>
         ) : (
-          <div className="flex min-h-0 min-w-0 flex-1 w-full flex-col items-center space-y-4 overflow-x-hidden overflow-y-auto bg-[#f3f4f6] p-4">
+          <div className="flex flex-1 w-full flex-col items-center overflow-x-hidden overflow-y-auto p-4">
             <PaperSheet
               key={`${sheetKey}-mobile`}
               {...paperSheetProps}
@@ -316,12 +316,12 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
         )}
       </div>
 
-      {/* —— Desktop shell (isolated; original side-by-side intact) —— */}
-      <div className="hidden h-full w-full md:flex md:flex-row">
-        <div className="flex h-full min-h-0 w-2/5 shrink-0 flex-col overflow-hidden border-r border-slate-800">
+      {/* —— Desktop shell (side-by-side only from md and up) —— */}
+      <div className="hidden h-full w-full overflow-hidden md:flex md:flex-row">
+        <div className="h-full w-[400px] flex-shrink-0 overflow-hidden border-r border-slate-800">
           <ControlPanel {...controlPanelProps} />
         </div>
-        <div className="min-h-0 flex-1 overflow-hidden md:w-3/5">
+        <div className="h-full flex-grow overflow-y-auto">
           <PaperSheet key={`${sheetKey}-desktop`} {...paperSheetProps} />
         </div>
       </div>
