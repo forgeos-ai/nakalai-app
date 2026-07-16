@@ -3,7 +3,7 @@
   "framework": "vite",
   "rewrites": [
     {
-      "source": "/((?!api/|src/|content/|runtimeMode|@vite|@id|@fs|@react-refresh|node_modules/|assets/).*)",
+      "source": "/((?!api/|src/|lib/|content/|runtimeMode|@vite|@id|@fs|@react-refresh|node_modules/|assets/).*)",
       "destination": "/index.html"
     }
   ],
