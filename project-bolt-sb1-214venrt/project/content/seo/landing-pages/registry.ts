@@ -17,6 +17,7 @@ export const RESERVED_STATIC_SLUGS = new Set([
   'assets',
   'api',
   'models',
+  'golden-lab',
 ]);
 
 export type ResolvedLandingPage = LandingPageConfig & {

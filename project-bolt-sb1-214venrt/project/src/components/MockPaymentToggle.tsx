@@ -3,21 +3,24 @@ import type { CheckoutQuote } from '../billing';
 
 type MockPaymentToggleProps = {
   isPaid: boolean;
-  onToggle: () => void;
+  /** Canonical pay/download action — same function as the sidebar CTA. */
+  onPay: () => void;
   checkoutQuote: CheckoutQuote;
   /** sticky = desktop canvas header; inline = mobile feed block (scrolls away). */
   layout?: 'sticky' | 'inline';
+  disabled?: boolean;
 };
 
 /**
- * Canvas-side mock UPI payment control with dynamic tier pricing.
- * "Paid" drops the preview watermark and unlocks clean high-res PDF export.
+ * Canvas payment CTA — visual checkout summary only.
+ * Always invokes the single canonical pay path (no mock toggle).
  */
 export default function MockPaymentToggle({
   isPaid,
-  onToggle,
+  onPay,
   checkoutQuote,
   layout = 'sticky',
+  disabled = false,
 }: MockPaymentToggleProps) {
   const shellClass =
     layout === 'inline'
@@ -44,9 +47,10 @@ export default function MockPaymentToggle({
       </div>
       <button
         type="button"
-        onClick={onToggle}
+        onClick={onPay}
+        disabled={disabled}
         aria-pressed={isPaid}
-        className={`inline-flex shrink-0 items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold transition-all focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+        className={`inline-flex shrink-0 items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold transition-all focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 ${
           isPaid
             ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25 hover:bg-emerald-500 focus:ring-emerald-500'
             : 'bg-slate-900 text-white shadow-md shadow-slate-900/20 hover:bg-slate-800 focus:ring-slate-500'

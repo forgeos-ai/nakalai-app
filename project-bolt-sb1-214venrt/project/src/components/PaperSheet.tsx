@@ -14,7 +14,8 @@ type PaperSheetProps = {
   /** Exact Google Fonts family from Match My Style / active face. */
   matchedFontFamily?: string;
   isPaid: boolean;
-  onTogglePayment: () => void;
+  /** Canonical pay/download — same handler as sidebar Pay CTA. */
+  onPay: () => void;
   matchedStyle?: MatchedStyleOverrides | null;
   checkoutQuote: CheckoutQuote;
   /** Remount / repaint revision when a new photo match lands. */
@@ -34,7 +35,7 @@ export default function PaperSheet({
   fontStyle,
   matchedFontFamily,
   isPaid,
-  onTogglePayment,
+  onPay,
   matchedStyle = null,
   checkoutQuote,
   paintRevision = 0,
@@ -53,10 +54,10 @@ export default function PaperSheet({
 
   if (fitMobileViewport) {
     return (
-      <div className="flex w-full max-w-md flex-col items-stretch gap-4">
+      <div className="flex w-full max-w-full flex-col items-stretch gap-4">
         <MockPaymentToggle
           isPaid={isPaid}
-          onToggle={onTogglePayment}
+          onPay={onPay}
           checkoutQuote={checkoutQuote}
           layout="inline"
         />
@@ -70,7 +71,7 @@ export default function PaperSheet({
         {pages.map((page) => (
           <div
             key={`mobile-shell-${page.pageNumber}-${paperType.id}-${family}-${paintRevision}`}
-            className="w-full max-w-md overflow-hidden rounded-lg bg-white shadow-sm"
+            className="w-full max-w-full overflow-hidden rounded-lg bg-white shadow-sm"
           >
             <A4Page
               segments={page.segments}
@@ -105,7 +106,7 @@ export default function PaperSheet({
       <div className="flex min-h-full flex-col items-center gap-6 p-4 sm:p-6 md:p-8">
         <MockPaymentToggle
           isPaid={isPaid}
-          onToggle={onTogglePayment}
+          onPay={onPay}
           checkoutQuote={checkoutQuote}
           layout="sticky"
         />

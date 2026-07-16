@@ -29,11 +29,3 @@ export function isRazorpayConfigured(): boolean {
   const secret = getRazorpayKeySecret();
   return Boolean(id && secret && !id.includes('YOUR_') && !secret.includes('YOUR_'));
 }
-
-export function getSupabaseServiceRoleKey(): string {
-  return read('SUPABASE_SERVICE_ROLE_KEY');
-}
-
-export function getSupabaseUrl(): string {
-  return read('SUPABASE_URL') || read('NEXT_PUBLIC_SUPABASE_URL') || read('VITE_SUPABASE_URL');
-}

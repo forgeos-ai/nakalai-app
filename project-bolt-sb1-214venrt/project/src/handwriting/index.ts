@@ -42,6 +42,7 @@ export {
   beginFreshUploadSession,
   acquireExtractToken,
   acquireRenderToken,
+  invalidateRenderGeneration,
   isExtractTokenLive,
   isRenderTokenLive,
   getPipelineEpoch,
@@ -59,3 +60,11 @@ export {
   probeFontUsable,
   getFontRegistryGeneration,
 } from './FontRegistry';
+
+/** DNA Engine v1 re-exports for UI / lifecycle consumers. */
+export {
+  destroyHandwritingSession,
+  getActiveHandwritingDNA,
+  getDnaDebugSnapshot,
+  type HandwritingDNA,
+} from '../../lib/handwriting';

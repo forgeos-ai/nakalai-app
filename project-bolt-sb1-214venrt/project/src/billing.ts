@@ -4,10 +4,15 @@ export type BillingTier = 'standard' | 'premium';
 
 export type PackageEngine = 'standard' | 'premium';
 
+/** Founder entry allowance: Standard ₹19 / Custom ₹49 cover up to this many pages. */
+export const ENTRY_PACKAGE_PAGES = 5 as const;
+
+export const BULK_PACKAGE_PAGES = 75 as const;
+
 export type PricingPackage = {
   id: string;
   label: string;
-  pages: 10 | 75;
+  pages: typeof ENTRY_PACKAGE_PAGES | typeof BULK_PACKAGE_PAGES;
   engine: PackageEngine;
   amountInr: number;
 };
@@ -16,29 +21,29 @@ export type PricingPackage = {
 export const PRICING_PACKAGES: PricingPackage[] = [
   {
     id: 'std-10',
-    label: 'Standard 10-Page Pack — ₹19 (₹1.90/page)',
-    pages: 10,
+    label: 'Standard 5-Page Pack — ₹19 (₹3.80/page)',
+    pages: ENTRY_PACKAGE_PAGES,
     engine: 'standard',
     amountInr: 19,
   },
   {
     id: 'match-10',
-    label: 'Premium Match 10-Page Pack — ₹49 (₹4.90/page)',
-    pages: 10,
+    label: 'Premium Match 5-Page Pack — ₹49 (₹9.80/page)',
+    pages: ENTRY_PACKAGE_PAGES,
     engine: 'premium',
     amountInr: 49,
   },
   {
     id: 'std-75',
     label: 'Standard 75-Page Value Pack — ₹79 (₹1.05/page)',
-    pages: 75,
+    pages: BULK_PACKAGE_PAGES,
     engine: 'standard',
     amountInr: 79,
   },
   {
     id: 'match-75',
     label: 'Premium Match 75-Page Value Pack — ₹109 (₹1.45/page)',
-    pages: 75,
+    pages: BULK_PACKAGE_PAGES,
     engine: 'premium',
     amountInr: 109,
   },
@@ -97,12 +102,12 @@ export function getCheckoutQuote(
   return quoteFromPackage(pkg);
 }
 
-/** Prefer bulk package when canvas exceeds 10 pages. */
+/** Prefer bulk package when canvas exceeds the entry pack allowance. */
 export function resolveDefaultPackageId(
   hasMatchedStyle: boolean,
   layoutPageCount: number,
 ): string {
-  const needsBulk = layoutPageCount > 10;
+  const needsBulk = layoutPageCount > ENTRY_PACKAGE_PAGES;
   if (hasMatchedStyle && needsBulk) return 'match-75';
   if (hasMatchedStyle) return 'match-10';
   if (needsBulk) return 'std-75';
@@ -141,7 +146,11 @@ export const pricingTiers: PricingTier[] = PRICING_PACKAGES.map((p) => ({
   ...p,
   name: p.label,
   badge:
-    p.pages === 75 ? 'Best Value' : p.engine === 'premium' ? 'Popular' : null,
+    p.pages === BULK_PACKAGE_PAGES
+      ? 'Best Value'
+      : p.engine === 'premium'
+        ? 'Popular'
+        : null,
   description:
     p.engine === 'premium'
       ? `Match My Style · up to ${p.pages} pages`
@@ -160,7 +169,7 @@ export function isTierSufficient(
 }
 
 export function shouldHighlightBulkBundle(layoutPageCount: number): boolean {
-  return layoutPageCount > 10;
+  return layoutPageCount > ENTRY_PACKAGE_PAGES;
 }
 
 export function bulkValueProposition(): string {

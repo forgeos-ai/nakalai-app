@@ -44,6 +44,22 @@ export const letterPatchSession: LetterPatchSession = {
 };
 
 export function clearLetterPatchSession(): void {
+  if (letterPatchSession.canvases) {
+    for (const key of Object.keys(letterPatchSession.canvases) as Array<
+      keyof typeof letterPatchSession.canvases
+    >) {
+      const c = letterPatchSession.canvases[key];
+      if (!c) continue;
+      try {
+        const ctx = c.getContext('2d');
+        ctx?.clearRect(0, 0, c.width, c.height);
+        c.width = 0;
+        c.height = 0;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
   letterPatchSession.canvases = null;
   letterPatchSession.sourceWidth = 0;
   letterPatchSession.sourceHeight = 0;

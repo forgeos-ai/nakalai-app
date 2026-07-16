@@ -357,7 +357,7 @@ function blogPostHtml(post) {
 function trustHtml(page) {
   let bodyInner = '';
   if (page.path === '/about') {
-    bodyInner = `<p>NakalAI helps students convert typed text into realistic handwriting on A4 notebook pages. Preview is free forever. Clean PDF downloads are pay-per-assignment.</p><p>We focus on technical quality, privacy-aware lead capture, and organic discovery — not paid ads.</p>`;
+    bodyInner = `<p>NakalAI helps students convert typed text into realistic handwriting on A4 notebook pages. Preview is free forever. Clean PDF downloads are pay-per-assignment.</p><p>We focus on technical quality, account-free privacy, and organic discovery — not paid ads.</p>`;
   } else if (page.path === '/pricing') {
     const best = getBestBulkTier();
     bodyInner = `
@@ -374,7 +374,7 @@ function trustHtml(page) {
       (f) => `<details><summary>${escapeHtml(f.q)}</summary><p>${escapeHtml(f.a)}</p></details>`,
     ).join('');
   } else if (page.path === '/privacy') {
-    bodyInner = `<p>We collect student profile details (name, email, mobile) with explicit DPDP-oriented consent before PDF download for service verification and updates. Assignment text is processed in-session for rendering. See contact options to request access or deletion.</p>`;
+    bodyInner = `<p>NakalAI is an account-free utility. We do not ask for a student profile, name, email address, or phone number. Assignment text is processed in your browser session for preview and export. Payment is handled through the configured payment provider.</p>`;
   } else if (page.path === '/terms') {
     bodyInner = `<p>By using NakalAI you agree to use the tool for your own academic work and to follow your institution’s integrity policies. Preview is free. Paid downloads unlock clean PDFs as described on the pricing page. Digital goods may be non-refundable once delivered — see Refund Policy.</p>`;
   } else if (page.path === '/contact') {

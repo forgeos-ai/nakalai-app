@@ -9,6 +9,8 @@ import { clearExtractedGlyphs } from '../utils/glyphSlicer';
 import { clearJitterCache } from '../jitter';
 import { clearHandwritingProfile } from './HandwritingProfile';
 import { invalidateFontRegistry } from './FontRegistry';
+import { clearHandwritingDNA } from '../../lib/handwriting/dna/session';
+import { clearLetterPatchSession } from '../utils/matrixSlicer';
 
 /** Monotonic session id — bumps on every new upload / hard reset. */
 let pipelineEpoch = 0;
@@ -166,7 +168,9 @@ export function beginFreshUploadSession(): PipelineSession {
   disposeTrackedBitmaps();
 
   clearHandwritingProfile();
+  clearHandwritingDNA();
   clearExtractedGlyphs();
+  clearLetterPatchSession();
   clearJitterCache();
   invalidateFontRegistry();
 
@@ -197,6 +201,12 @@ export function acquireRenderToken(): number {
   }
   renderSeq += 1;
   return renderGeneration * 1_000_000 + renderSeq;
+}
+
+/** Kill in-flight paints without starting a fresh extract session. */
+export function invalidateRenderGeneration(): void {
+  renderGeneration += 1;
+  renderSeq = 0;
 }
 
 /**

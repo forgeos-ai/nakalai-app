@@ -227,6 +227,14 @@ export const extractedGlyphs: ExtractedGlyphsSession = {
 };
 
 export function clearExtractedGlyphs(): void {
+  // Zeroize glyph pixel buffers before dropping references.
+  for (const g of extractedGlyphs.glyphs) {
+    try {
+      g.matrix.pixels.fill(255);
+    } catch {
+      /* ignore */
+    }
+  }
   extractedGlyphs.glyphs = [];
   extractedGlyphs.sourceWidth = 0;
   extractedGlyphs.sourceHeight = 0;

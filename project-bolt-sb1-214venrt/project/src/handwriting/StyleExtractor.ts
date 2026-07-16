@@ -24,6 +24,13 @@ import {
   untrackObjectUrl,
 } from './RenderLifecycle';
 import { createSeededRng } from './VariationEngine';
+import {
+  assembleHandwritingDNA,
+  segmentHandwritingFile,
+  setActiveHandwritingDNA,
+  handwritingDnaToProfile,
+  getDnaDebugSnapshot,
+} from '../../lib/handwriting';
 
 export type StyleExtractRequest = {
   file: File;
@@ -392,6 +399,9 @@ export function notebookStyleToHandwritingProfile(
 /**
  * Primary Match My Style entry — always starts a fresh pipeline session
  * so the Nth upload behaves like the first.
+ *
+ * DNA Engine v1: runs ROI pixel metrics + unlabeled segmentation in parallel,
+ * assembles HandwritingDNA in memory, adapts to HandwritingProfile for render.
  */
 export async function extractHandwritingProfile(
   request: StyleExtractRequest,
@@ -416,29 +426,24 @@ export async function extractHandwritingProfile(
     };
   }
 
-  let extracted: ExtractedNotebookStyle;
-  try {
-    extracted = await extractNotebookStyle(file, {
-      inputText,
-      trackObjectUrl,
-      untrackObjectUrl,
-      extractToken: token,
-      isTokenLive: isExtractTokenLive,
-    });
-  } catch (err) {
-    console.warn('[NakalAI] StyleExtractor failed:', err);
-    if (!isExtractTokenLive(token)) {
-      return {
-        profile: createDefaultHandwritingProfile({ usedFallback: true }),
-        committed: false,
-        token,
-      };
-    }
-    const fallbackSeed = hashProfileSeed([fingerprint, 'extract-fallback']);
-    const fallback = createGeneralizedFallbackProfile(fallbackSeed);
-    setActiveHandwritingProfile(fallback);
-    return { profile: fallback, committed: true, token };
-  }
+  // Parallel: existing pixel metrics + unlabeled glyph segmentation.
+  const [styleOutcome, segmentOutcome] = await Promise.all([
+    (async () => {
+      try {
+        const extracted = await extractNotebookStyle(file, {
+          inputText,
+          trackObjectUrl,
+          untrackObjectUrl,
+          extractToken: token,
+          isTokenLive: isExtractTokenLive,
+        });
+        return { ok: true as const, extracted };
+      } catch (err) {
+        return { ok: false as const, err };
+      }
+    })(),
+    segmentHandwritingFile(file),
+  ]);
 
   if (!isExtractTokenLive(token)) {
     return {
@@ -448,9 +453,48 @@ export async function extractHandwritingProfile(
     };
   }
 
-  const profile = notebookStyleToHandwritingProfile(extracted, {
-    name: file.name,
-    size: file.size,
+  if (!styleOutcome.ok) {
+    console.warn('[NakalAI] StyleExtractor failed:', styleOutcome.err);
+    const fallbackSeed = hashProfileSeed([fingerprint, 'extract-fallback']);
+    const fallback = createGeneralizedFallbackProfile(fallbackSeed);
+    const dna = assembleHandwritingDNA({
+      extracted: {
+        inkHex: fallback.inkHex,
+        slantDegrees: fallback.slantDegrees,
+        noiseIntensity: fallback.randomness,
+        fontCategory: 'loose-scratch',
+        fontClass: fallback.fontClass,
+        fontFamily: fallback.fontFamily,
+        strokeThickness: 2.5,
+        connectivityRatio: 0.55,
+        confidence: 0,
+        avgRunsPerRow: 4,
+        verticalContinuity: 0.5,
+        relativeRunWidth: 0.5,
+        inkSampleCount: 0,
+        usedFallback: true,
+      },
+      segmentation: segmentOutcome.dna,
+      fingerprint,
+    });
+    setActiveHandwritingDNA(dna);
+    const profile = handwritingDnaToProfile(dna);
+    setActiveHandwritingProfile(profile);
+    return { profile, committed: true, token };
+  }
+
+  const extracted = styleOutcome.extracted;
+  if (!isExtractTokenLive(token)) {
+    return {
+      profile: createDefaultHandwritingProfile({ usedFallback: true }),
+      committed: false,
+      token,
+    };
+  }
+
+  const dna = assembleHandwritingDNA({
+    extracted,
+    segmentation: segmentOutcome.dna,
     fingerprint,
   });
 
@@ -462,6 +506,22 @@ export async function extractHandwritingProfile(
     };
   }
 
+  setActiveHandwritingDNA(dna);
+  const profile = handwritingDnaToProfile(dna);
   setActiveHandwritingProfile(profile);
+
+  if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {
+    const snap = getDnaDebugSnapshot(dna);
+    if (snap) {
+      console.info('[NakalAI] DNA Engine v1', {
+        confidence: snap.confidence,
+        source: snap.source,
+        lines: snap.segmentation.lines,
+        characters: snap.segmentation.characters,
+        clusters: snap.segmentation.clusters,
+      });
+    }
+  }
+
   return { profile, committed: true, token };
 }

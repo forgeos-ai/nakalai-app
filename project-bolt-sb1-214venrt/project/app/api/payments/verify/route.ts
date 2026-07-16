@@ -11,7 +11,6 @@ import {
   isRazorpayConfigured,
   verifyRazorpayPaymentSignature,
 } from '../../../../lib/security/razorpay';
-import { recordVerifiedPayment } from '../../../../lib/security/supabaseAdmin';
 
 export const runtime = 'nodejs';
 
@@ -21,9 +20,6 @@ type VerifyBody = {
   razorpay_signature?: string;
   packageId?: string;
   contentHash?: string;
-  userId?: string;
-  email?: string;
-  mobileNumber?: string;
 };
 
 export async function POST(request: Request): Promise<Response> {
@@ -113,16 +109,6 @@ export async function POST(request: Request): Promise<Response> {
     orderId,
     amountPaise: expectedPaise,
     contentHash,
-  });
-
-  await recordVerifiedPayment({
-    userId: body.userId?.trim().toLowerCase(),
-    paymentId,
-    orderId,
-    packageId: pkg.id,
-    amountInr: pkg.amountInr,
-    email: body.email?.trim().toLowerCase(),
-    mobileNumber: body.mobileNumber?.trim(),
   });
 
   return jsonResponse(200, {

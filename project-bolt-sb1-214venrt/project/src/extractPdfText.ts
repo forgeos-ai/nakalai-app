@@ -1,5 +1,8 @@
+import './pdfPromisePolyfill';
 import * as pdfjs from 'pdfjs-dist';
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { assertPdfSize } from './security/fileValidation';
+import { ensurePromiseWithResolvers } from './pdfPromisePolyfill';
 
 /** User-facing message for encrypted / scanned / empty-text PDFs. */
 export const PDF_EXTRACT_FALLBACK_MESSAGE =
@@ -9,21 +12,16 @@ export const PDF_EXTRACT_FALLBACK_MESSAGE =
 export const PDF_SINGLE_FILE_MESSAGE =
   'Only 1 PDF can be converted at a time.';
 
-/**
- * Absolute CDN worker — relative Vite/`node_modules` worker URLs fail mobile
- * cross-origin / isolation checks. pdf.js 5+/6 ship ESM workers as `.min.mjs`
- * on cdnjs (matched to `pdfjs.version`). Skipped entirely on iOS (see below).
- */
-pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
-
 const MIN_MEANINGFUL_CHARS = 8;
 
-/** iPhone / iPad Safari (incl. desktop-class iPad) — Web Workers crash PDF parse. */
+/** Prefer the Vite-bundled worker (same-origin) over CDN for mobile Safari CORS. */
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+
+/** iPhone / iPad Safari (incl. desktop-class iPad). */
 function isIosViewport(): boolean {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
   if (/iPhone|iPad|iPod/i.test(ua)) return true;
-  // iPadOS 13+ may report as Mac with touch
   return (
     navigator.platform === 'MacIntel' &&
     typeof navigator.maxTouchPoints === 'number' &&
@@ -31,18 +29,38 @@ function isIosViewport(): boolean {
   );
 }
 
+/** Any Safari engine (iOS or macOS) — module workers are unreliable. */
+function isSafariEngine(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  // Chrome/Android/CriOS/Firefox also include "Safari" in UA — exclude them.
+  const isSafari =
+    /Safari/i.test(ua) &&
+    !/Chrome|CriOS|Chromium|Android|Firefox|FxiOS|Edg|OPR|Opera/i.test(ua);
+  return isSafari || isIosViewport();
+}
+
 /**
- * Bind WorkerMessageHandler on the main thread so pdf.js uses its fake-worker
- * path (no dedicated Worker). Equivalent to legacy `disableWorker: true`.
+ * Bind WorkerMessageHandler on the main thread so pdf.js skips
+ * `new Worker(..., { type: "module" })` and uses its fake-worker path.
+ * Required for Safari / iOS (module workers are unreliable).
  */
 async function bindMainThreadPdfWorker(): Promise<void> {
+  ensurePromiseWithResolvers();
   const g = globalThis as typeof globalThis & {
     pdfjsWorker?: { WorkerMessageHandler?: unknown };
   };
   if (g.pdfjsWorker?.WorkerMessageHandler) return;
 
   const workerMod = await import('pdfjs-dist/build/pdf.worker.min.mjs');
-  g.pdfjsWorker = workerMod as { WorkerMessageHandler?: unknown };
+  const handler =
+    (workerMod as { WorkerMessageHandler?: unknown }).WorkerMessageHandler ??
+    (workerMod as { default?: { WorkerMessageHandler?: unknown } }).default
+      ?.WorkerMessageHandler;
+  if (!handler) {
+    throw new Error('PDF.js WorkerMessageHandler unavailable');
+  }
+  g.pdfjsWorker = { WorkerMessageHandler: handler };
 }
 
 /**
@@ -93,44 +111,57 @@ function normalizeExtractedText(raw: string): string {
 
 type PdfDocument = Awaited<ReturnType<typeof pdfjs.getDocument>['promise']>;
 
+/** Owned Uint8Array copy — avoids Safari SharedArrayBuffer / detached buffer issues. */
+function ownedPdfBytes(data: Uint8Array): Uint8Array {
+  return data.slice();
+}
+
+async function openPdfDocument(bytes: Uint8Array): Promise<PdfDocument> {
+  ensurePromiseWithResolvers();
+  // Fresh copy so Safari never sees a detached/shared backing store.
+  const data = new Uint8Array(bytes.byteLength);
+  data.set(bytes);
+  return pdfjs.getDocument({
+    data,
+    useSystemFonts: true,
+    disableFontFace: false,
+    password: '',
+  }).promise;
+}
+
 /**
- * Load PDF. Non-iOS uses the CDN worker; iOS runs inline on the main UI
- * thread (`disableWorker: true` + main-thread WorkerMessageHandler) so Safari
- * never hits thread-isolation Worker crashes. Text extraction results match.
+ * Load PDF. Safari/iOS always uses the main-thread fake worker.
+ * Other browsers try the bundled worker first, then fall back to main-thread
+ * so extraction stays identical across platforms.
  */
 async function loadPdfDocument(data: Uint8Array): Promise<PdfDocument> {
+  const bytes = ownedPdfBytes(data);
+
+  const loadMainThread = async (): Promise<PdfDocument> => {
+    await bindMainThreadPdfWorker();
+    return openPdfDocument(bytes);
+  };
+
+  const loadWithWorker = async (): Promise<PdfDocument> => {
+    pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+    return openPdfDocument(bytes);
+  };
+
   try {
-    const arrayBuffer = data.buffer.slice(
-      data.byteOffset,
-      data.byteOffset + data.byteLength,
-    );
-
-    if (isIosViewport()) {
-      await bindMainThreadPdfWorker();
-      // disableWorker is legacy; pdf.js 6 ignores unknown keys but we pass it
-      // explicitly and force main-thread parsing via pdfjsWorker above.
-      const loadingTask = pdfjs.getDocument({
-        data: arrayBuffer,
-        disableWorker: true,
-        useSystemFonts: true,
-        disableFontFace: false,
-        password: '',
-      } as Parameters<typeof pdfjs.getDocument>[0] & {
-        disableWorker?: boolean;
-      });
-      return await loadingTask.promise;
+    if (isSafariEngine()) {
+      return await loadMainThread();
     }
-
-    return await pdfjs.getDocument({
-      data,
-      useSystemFonts: true,
-      disableFontFace: false,
-      password: '',
-    }).promise;
+    try {
+      return await loadWithWorker();
+    } catch (workerErr) {
+      console.warn(
+        '[NakalAI] PDF.js worker path failed; retrying on main thread:',
+        workerErr,
+      );
+      return await loadMainThread();
+    }
   } catch (err) {
     console.warn('[NakalAI] PDF.js worker/document load failed:', err);
-    // Soft degrade — callers catch PDF_EXTRACT_FALLBACK_MESSAGE without
-    // tearing down the handwriting canvas.
     throw new Error(PDF_EXTRACT_FALLBACK_MESSAGE);
   }
 }
@@ -177,13 +208,36 @@ async function collectPageTextLayers(pdf: PdfDocument): Promise<string[]> {
 }
 
 /**
+ * Read file bytes with ArrayBuffer first, FileReader fallback for older Safari.
+ */
+async function readFileBytes(file: File): Promise<Uint8Array> {
+  try {
+    const buffer = await file.arrayBuffer();
+    return new Uint8Array(buffer);
+  } catch {
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (result instanceof ArrayBuffer) {
+          resolve(new Uint8Array(result));
+          return;
+        }
+        reject(new Error(PDF_EXTRACT_FALLBACK_MESSAGE));
+      };
+      reader.onerror = () => reject(new Error(PDF_EXTRACT_FALLBACK_MESSAGE));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+}
+
+/**
  * Client-side PDF → plain text via pdf.js (zero infrastructure).
  * Accepts exactly one File — callers must gate multi-file selection with
  * `assertSinglePdfFile` first. Returned text is meant to REPLACE (not append)
  * the Assignment Text state so 1 PDF = 1 assignment layout.
  */
 export async function extractTextFromPdf(file: File): Promise<string> {
-  // Mobile explorers often pass empty/modified MIME — fall back to extension.
   const isPDF =
     file.type === 'application/pdf' ||
     file.name.toLowerCase().endsWith('.pdf');
@@ -192,21 +246,20 @@ export async function extractTextFromPdf(file: File): Promise<string> {
     throw new Error(PDF_EXTRACT_FALLBACK_MESSAGE);
   }
 
-  let data: ArrayBuffer;
+  let data: Uint8Array;
   try {
-    data = await file.arrayBuffer();
+    data = await readFileBytes(file);
   } catch {
     throw new Error(PDF_EXTRACT_FALLBACK_MESSAGE);
   }
 
   let pdf: PdfDocument | null = null;
   try {
-    pdf = await loadPdfDocument(new Uint8Array(data));
+    pdf = await loadPdfDocument(data);
     const pageTexts = await collectPageTextLayers(pdf);
     const combined = normalizeExtractedText(pageTexts.join('\n\n'));
 
     if (combined.replace(/\s/g, '').length < MIN_MEANINGFUL_CHARS) {
-      // Likely a scanned/image-only PDF with no text layer
       throw new Error(PDF_EXTRACT_FALLBACK_MESSAGE);
     }
 

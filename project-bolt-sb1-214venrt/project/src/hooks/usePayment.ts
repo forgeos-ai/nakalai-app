@@ -1,9 +1,9 @@
 /**
- * Premium checkout hook — dev mock path + production Razorpay verification.
+ * Premium checkout hook — mock path + Razorpay Checkout + server verification.
+ * Download unlock remains a separate step (authorize/export).
  */
 
 import { useCallback, useState } from 'react';
-import { isSupabaseConfigured, supabase } from '../utils/supabase';
 import {
   completeMockPayment,
   type PaymentReceipt,
@@ -16,11 +16,11 @@ import {
   type CheckoutQuote,
   type PricingTier,
 } from '../billing';
-import { syncLocalPaymentStatus, getStudentProfile } from '../studentProfile';
 import { allowMockPayments } from '../security/runtimeMode';
 import { fingerprintAssignment } from '../security/contentFingerprint';
-import { setServerEntitlement } from '../security/serverEntitlement';
 import { openRazorpayCheckout } from '../security/razorpayCheckout';
+import { setServerEntitlement } from '../security/serverEntitlement';
+import { SOURCE_APP } from '../sourceApp';
 
 const GATEWAY_DELAY_MS = 1500;
 
@@ -31,6 +31,10 @@ export type PremiumCheckoutResult = {
   activation: CheckoutActivationPayload;
   ledgerSynced: boolean;
   error?: string;
+  /**
+   * Razorpay Checkout reported success (before or after server verification).
+   */
+  checkoutSucceeded?: boolean;
 };
 
 export type UsePaymentOptions = {
@@ -44,74 +48,34 @@ export type UsePaymentOptions = {
   ) => void;
 };
 
-export function resolveCheckoutUserId(): string {
-  const profile = getStudentProfile();
-  if (profile?.email) return profile.email.trim().toLowerCase();
-  try {
-    const key = 'nakalai_anon_user_id';
-    let id = localStorage.getItem(key);
-    if (!id) {
-      id =
-        typeof crypto !== 'undefined' && 'randomUUID' in crypto
-          ? crypto.randomUUID()
-          : `anon_${Date.now()}`;
-      localStorage.setItem(key, id);
-    }
-    return id;
-  } catch {
-    return `anon_${Date.now()}`;
-  }
-}
+type CreateOrderResponse = {
+  orderId?: string;
+  currency?: string;
+  amount?: number;
+  publicKey?: string;
+  packageId?: string;
+  error?: string;
+  code?: string;
+};
 
-/**
- * Dev-only ledger upsert. Production premium access must be written server-side
- * after Razorpay signature verification (service role).
- */
-export async function upsertPremiumSubscription(
-  userId: string,
-): Promise<{ ok: boolean; error?: string }> {
-  if (!allowMockPayments()) {
-    return { ok: true };
-  }
-
-  if (!isSupabaseConfigured) {
-    if (import.meta.env.DEV) {
-      console.info(
-        '[NakalAI] Supabase unconfigured — skipping user_subscriptions upsert (local unlock still applied).',
-      );
-    }
-    return { ok: true };
-  }
-
-  try {
-    const { error } = await supabase.from('user_subscriptions').upsert(
-      {
-        user_id: userId,
-        premium_access: true,
-        downloaded_passes: 1,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id' },
-    );
-
-    if (error) {
-      console.warn('[NakalAI] user_subscriptions upsert failed:', error.message);
-      return { ok: false, error: error.message };
-    }
-    return { ok: true };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'ledger-upsert-failed';
-    console.warn('[NakalAI] user_subscriptions upsert exception:', message);
-    return { ok: false, error: message };
-  }
-}
+type VerifyPaymentResponse = {
+  ok?: boolean;
+  paymentVerificationToken?: string;
+  packageId?: string;
+  maxPages?: number;
+  amountInr?: number;
+  paymentId?: string;
+  orderId?: string;
+  expiresInSeconds?: number;
+  error?: string;
+  code?: string;
+};
 
 async function initiateProductionCheckout(
   activation: CheckoutActivationPayload,
   quote: CheckoutQuote,
   layoutPageCount: number,
   assignmentText: string,
-  userId: string,
 ): Promise<PremiumCheckoutResult> {
   const contentHash = await fingerprintAssignment(
     assignmentText,
@@ -119,64 +83,109 @@ async function initiateProductionCheckout(
     activation.id,
   );
 
-  const orderRes = await fetch('/api/payments/create-order', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      packageId: activation.id,
-      contentHash,
-    }),
-    cache: 'no-store',
-  });
-
-  const orderData = (await orderRes.json().catch(() => ({}))) as {
-    ok?: boolean;
-    orderId?: string;
-    keyId?: string;
-    amountPaise?: number;
-    error?: string;
-  };
-
-  if (!orderRes.ok || !orderData.ok || !orderData.orderId || !orderData.keyId) {
+  let orderRes: Response;
+  try {
+    orderRes = await fetch('/api/payments/create-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        packageId: activation.id,
+        contentHash,
+      }),
+      cache: 'no-store',
+    });
+  } catch {
     return {
       ok: false,
       receipt: null,
       quote,
       activation,
       ledgerSynced: false,
-      error: orderData.error ?? 'Payment gateway is not available.',
+      error: 'Network error. Check your connection and try again.',
     };
   }
 
-  const razorpayResponse = await openRazorpayCheckout({
-    keyId: orderData.keyId,
+  const orderData = (await orderRes.json().catch(() => ({}))) as CreateOrderResponse;
+
+  if (!orderRes.ok) {
+    const statusHint =
+      orderRes.status === 503
+        ? 'Payment gateway is not configured. Please try again later.'
+        : orderRes.status === 429
+          ? 'Too many payment attempts. Please wait and try again.'
+          : orderRes.status === 404
+            ? 'Payment service is unavailable. Please try again later.'
+            : null;
+    return {
+      ok: false,
+      receipt: null,
+      quote,
+      activation,
+      ledgerSynced: false,
+      error:
+        orderData.error ??
+        statusHint ??
+        'Payment gateway is not available.',
+    };
+  }
+
+  if (!orderData.orderId || !orderData.publicKey || !orderData.amount) {
+    return {
+      ok: false,
+      receipt: null,
+      quote,
+      activation,
+      ledgerSynced: false,
+      error: 'Payment order is incomplete. Please try again.',
+    };
+  }
+
+  const checkoutResult = await openRazorpayCheckout({
+    publicKey: orderData.publicKey,
     orderId: orderData.orderId,
-    amountPaise: orderData.amountPaise ?? Math.round(quote.amountInr * 100),
+    amountPaise: orderData.amount,
+    currency: orderData.currency ?? 'INR',
     description: quote.ctaLabel,
   });
 
-  const verifyRes = await fetch('/api/payments/verify', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      razorpay_order_id: razorpayResponse.razorpay_order_id,
-      razorpay_payment_id: razorpayResponse.razorpay_payment_id,
-      razorpay_signature: razorpayResponse.razorpay_signature,
-      packageId: activation.id,
-      contentHash,
-      userId,
-      email: getStudentProfile()?.email,
-      mobileNumber: getStudentProfile()?.mobileNumber,
-    }),
-    cache: 'no-store',
-  });
+  if (checkoutResult.status === 'failed') {
+    return {
+      ok: false,
+      receipt: null,
+      quote,
+      activation,
+      ledgerSynced: false,
+      error: checkoutResult.userMessage,
+    };
+  }
 
-  const verifyData = (await verifyRes.json().catch(() => ({}))) as {
-    ok?: boolean;
-    paymentVerificationToken?: string;
-    maxPages?: number;
-    error?: string;
-  };
+  let verifyRes: Response;
+  try {
+    verifyRes = await fetch('/api/payments/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        razorpay_order_id: checkoutResult.razorpay_order_id,
+        razorpay_payment_id: checkoutResult.razorpay_payment_id,
+        razorpay_signature: checkoutResult.razorpay_signature,
+        packageId: activation.id,
+        contentHash,
+      }),
+      cache: 'no-store',
+    });
+  } catch {
+    return {
+      ok: false,
+      receipt: null,
+      quote,
+      activation,
+      ledgerSynced: false,
+      checkoutSucceeded: true,
+      error: 'Payment received but verification network failed. Please retry.',
+    };
+  }
+
+  const verifyData = (await verifyRes.json().catch(() => ({}))) as VerifyPaymentResponse;
 
   if (!verifyRes.ok || !verifyData.ok || !verifyData.paymentVerificationToken) {
     return {
@@ -185,41 +194,42 @@ async function initiateProductionCheckout(
       quote,
       activation,
       ledgerSynced: false,
-      error: verifyData.error ?? 'Payment verification failed.',
+      checkoutSucceeded: true,
+      error:
+        verifyData.error ??
+        'Payment received but could not be verified. Please contact support.',
     };
   }
 
-  const expiresAt = Date.now() + (verifyData.maxPages ? 5 * 60 * 1000 : 5 * 60 * 1000);
+  const expiresInSeconds = verifyData.expiresInSeconds ?? 300;
   setServerEntitlement({
     paid: true,
     paymentVerificationToken: verifyData.paymentVerificationToken,
-    packageId: activation.id,
+    packageId: verifyData.packageId ?? activation.id,
     contentHash,
-    maxPages: verifyData.maxPages ?? activation.pageCount,
-    expiresAt,
+    maxPages: verifyData.maxPages ?? quote.pages,
+    expiresAt: Date.now() + expiresInSeconds * 1000,
   });
 
   const receipt: PaymentReceipt = {
     payment_status: 'paid',
     tier_type: quote.tier_type,
-    amount_inr: quote.amountInr,
+    amount_inr: verifyData.amountInr ?? quote.amountInr,
     paid_at: new Date().toISOString(),
-    source_app: 'nakalai',
+    source_app: SOURCE_APP,
   };
-
-  syncLocalPaymentStatus(true, receipt);
 
   return {
     ok: true,
     receipt,
     quote,
     activation,
-    ledgerSynced: true,
+    ledgerSynced: false,
+    checkoutSucceeded: true,
   };
 }
 
 export async function initiatePremiumCheckout(
-  userId: string,
   hasMatchedStyle = true,
   layoutPageCount = 1,
   selectedTier?: PricingTier | null,
@@ -239,29 +249,21 @@ export async function initiatePremiumCheckout(
       quote,
       layoutPageCount,
       assignmentText,
-      userId,
     );
-  }
-
-  if (import.meta.env.DEV) {
-    console.info('[NakalAI] checkout activation', activation);
   }
 
   await new Promise<void>((resolve) => {
     setTimeout(resolve, GATEWAY_DELAY_MS);
   });
 
-  const ledger = await upsertPremiumSubscription(userId);
   const receipt = completeMockPayment(quote);
-  syncLocalPaymentStatus(true, receipt);
 
   return {
     ok: true,
     receipt,
     quote,
     activation,
-    ledgerSynced: ledger.ok,
-    error: ledger.error,
+    ledgerSynced: false,
   };
 }
 
@@ -279,7 +281,6 @@ export function usePayment({
 
   const startPremiumCheckout = useCallback(
     async (
-      userIdOverride?: string,
       activationOverride?: CheckoutActivationPayload | null,
       assignmentText = '',
     ) => {
@@ -289,10 +290,7 @@ export function usePayment({
       setPaymentError(null);
 
       try {
-        const userId =
-          (userIdOverride?.trim() || resolveCheckoutUserId()).toLowerCase();
         const result = await initiatePremiumCheckout(
-          userId,
           hasMatchedStyle,
           layoutPageCount,
           selectedTier,

@@ -4,13 +4,18 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 3001",
+    "dev": "npm run local:mock",
+    "local:mock": "vite --mode MOCK --host 0.0.0.0 --port 3001",
     "build": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:dna": "tsx lib/handwriting/__tests__/dnaEngine.v1.test.ts",
+    "test:golden-lab": "tsx lib/handwriting/golden-lab/__tests__/goldenLab.v1.test.ts",
+    "test:pipeline-unification": "tsx lib/handwriting/__tests__/pipelineUnification.test.ts",
+    "test:motion-benchmark": "tsx lib/handwriting/__tests__/motionBenchmark.test.ts",
+    "test:handwriting": "npm run test:dna && npm run test:pipeline-unification && npm run test:motion-benchmark && npm run test:golden-lab"
   },
   "dependencies": {
     "@microsoft/onnxruntime-web": "npm:onnxruntime-web@^1.27.0",
-    "@supabase/supabase-js": "^2.57.4",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.344.0",
@@ -31,6 +36,7 @@
     "globals": "^15.9.0",
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.1",
+    "tsx": "^4.19.2",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.3.0",
     "vite": "^5.4.2"

@@ -207,7 +207,7 @@ export const LANDINGS = [
     faqs: [
       {
         q: 'Do I need an account?',
-        a: 'You can start previewing immediately. A short student profile is collected before download for service verification.',
+        a: 'No. Upload or enter your content, preview it, pay for the download, and leave. NakalAI does not require an account or student profile.',
       },
     ],
     related: ['/assignment-handwriting-generator', '/college-assignment-generator', '/about'],
@@ -440,7 +440,7 @@ export const TRUST_PAGES = [
   {
     path: '/privacy',
     title: 'Privacy Policy | NakalAI',
-    description: 'How NakalAI collects and uses student profile data under DPDP-oriented consent practices.',
+    description: 'How NakalAI provides private, account-free assignment previews and paid PDF downloads.',
     h1: 'Privacy Policy',
   },
   {
@@ -503,6 +503,6 @@ export const GLOBAL_FAQS = [
   },
   {
     q: 'Do you store my assignments?',
-    a: 'Assignment text is processed in your browser session for preview and export. Student profile details collected at download follow our Privacy Policy.',
+    a: 'Assignment text is processed in your browser session for preview and export. NakalAI does not require an account or collect a student profile, name, email, or phone number.',
   },
 ];

@@ -10,6 +10,9 @@ import { buildLandingPageJsonLd } from '../../content/seo/schemas/jsonLd';
 
 const App = lazy(() => import('../App'));
 const SeoLandingView = lazy(() => import('./SeoLandingView'));
+const GoldenLabPage = lazy(
+  () => import('../../lib/handwriting/golden-lab/GoldenLabPage'),
+);
 
 function pathSlug(): string | null {
   const raw = window.location.pathname.replace(/\/+$/, '') || '/';
@@ -37,8 +40,13 @@ const landingFallback = (
 export default function SpaRoot() {
   const slug = useMemo(() => pathSlug(), []);
 
+  const isGoldenLab = slug === 'golden-lab';
+
   const isSeoLanding =
-    Boolean(slug) && slug !== null && !RESERVED_STATIC_SLUGS.has(slug);
+    Boolean(slug) &&
+    slug !== null &&
+    !isGoldenLab &&
+    !RESERVED_STATIC_SLUGS.has(slug);
 
   useEffect(() => {
     if (!isSeoLanding || !slug) return;
@@ -50,7 +58,11 @@ export default function SpaRoot() {
   return (
     <>
       <AnalyticsBoot />
-      {isSeoLanding && slug ? (
+      {isGoldenLab ? (
+        <Suspense fallback={landingFallback}>
+          <GoldenLabPage />
+        </Suspense>
+      ) : isSeoLanding && slug ? (
         <Suspense fallback={landingFallback}>
           <SeoLandingView config={resolveLandingPage(slug)} />
         </Suspense>

@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
-import { INK_COLORS, PAPER_TYPES } from '../constants';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { INK_COLORS, PAPER_TYPES, FONT_STYLES, HANDWRITING_STYLE_BUCKETS } from '../constants';
 import type { InkColor, PaperType, FontStyle } from '../constants';
 import {
   PenLine,
@@ -11,6 +11,7 @@ import {
   ScanLine,
   X,
   Palette,
+  Type,
 } from 'lucide-react';
 import {
   FALLBACK_INK_HEX,
@@ -29,6 +30,7 @@ const PDF_SINGLE_FILE_MESSAGE = 'Only 1 PDF can be converted at a time.';
 
 import type { MatchedStyleOverrides } from '../pageGeometry';
 import {
+  ENTRY_PACKAGE_PAGES,
   isTierSufficient,
   resolveDefaultTier,
   toCheckoutActivationPayload,
@@ -38,16 +40,8 @@ import {
   type CheckoutQuote,
   type PricingTier,
 } from '../billing';
-import {
-  AD_BLOCKER_FREE_DOWNLOAD_WARNING,
-  FREE_TIER_PAGE_ALERT,
-  detectAdBlocker,
-  isWithinFreePageCap,
-} from '../clientGuards';
-import type { PaymentReceipt } from '../paymentGateway';
-import { getStudentProfile } from '../studentProfile';
 import { usePayment } from '../hooks/usePayment';
-import LeadCaptureModal from './LeadCaptureModal';
+import type { PaymentReceipt } from '../paymentGateway';
 
 type ControlPanelProps = {
   text: string;
@@ -56,8 +50,9 @@ type ControlPanelProps = {
   onInkColorChange: (value: InkColor) => void;
   paperType: PaperType;
   onPaperTypeChange: (value: PaperType) => void;
-  /** Auto-matched font from image analysis (display only — not user-picked). */
+  /** Standard Handwriting face from the 12-font library. */
   fontStyle: FontStyle;
+  onFontStyleChange?: (value: FontStyle) => void;
   /** Mock UPI paid — required before clean PDF export. */
   isPaid: boolean;
   matchedStyle?: MatchedStyleOverrides | null;
@@ -81,6 +76,13 @@ type ControlPanelProps = {
   stackAllSections?: boolean;
   /** Hide NakalAI header chrome (mobile shell already has its own tab bar). */
   hideBrandChrome?: boolean;
+  /** Registers the single canonical pay/download action for other CTAs (canvas). */
+  onRegisterPayAction?: (pay: () => void) => void;
+  /**
+   * Success-only DNA privacy purge after PDF assembly.
+   * App resets preview to Standard while freezing paid package identity.
+   */
+  onDnaPurgedAfterExport?: () => void;
 };
 
 function FieldLabel({
@@ -120,6 +122,8 @@ export default function ControlPanel({
   onInkColorChange,
   paperType,
   onPaperTypeChange,
+  fontStyle,
+  onFontStyleChange,
   isPaid,
   matchedStyle = null,
   onMatchedStyleChange,
@@ -131,9 +135,10 @@ export default function ControlPanel({
   onPaymentSuccess,
   stackAllSections = false,
   hideBrandChrome = false,
+  onRegisterPayAction,
+  onDnaPurgedAfterExport,
 }: ControlPanelProps) {
   const [isExporting, setIsExporting] = useState(false);
-  const [showLeadModal, setShowLeadModal] = useState(false);
   const [isExtractingPdf, setIsExtractingPdf] = useState(false);
   const [pdfExtractError, setPdfExtractError] = useState<string | null>(null);
   const [isPdfDragOver, setIsPdfDragOver] = useState(false);
@@ -143,8 +148,6 @@ export default function ControlPanel({
   const [isAnalyzingStyle, setIsAnalyzingStyle] = useState(false);
   const [styleError, setStyleError] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('text');
-  /** Free download disabled when an ad blocker is detected. */
-  const [adBlockerActive, setAdBlockerActive] = useState(false);
   const [clientGuardWarning, setClientGuardWarning] = useState<string | null>(
     null,
   );
@@ -215,18 +218,23 @@ export default function ControlPanel({
     }
 
     let file: File;
-    const pdfMod = await import('../extractPdfText');
+    let pdfMod: typeof import('../extractPdfText');
     try {
+      // Dynamic import inside try — Safari can fail on pdf.js init before extract.
+      pdfMod = await import('../extractPdfText');
       file = pdfMod.assertSinglePdfFile(list);
       const { validatePdfUpload } = await import('../security/fileValidation');
       await validatePdfUpload(file);
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : pdfMod.PDF_SINGLE_FILE_MESSAGE;
-      if (message === pdfMod.PDF_SINGLE_FILE_MESSAGE) {
+        err instanceof Error ? err.message : PDF_SINGLE_FILE_MESSAGE;
+      if (message === PDF_SINGLE_FILE_MESSAGE) {
         rejectMultiFile();
       } else {
-        setPdfExtractError(message);
+        setPdfExtractError(
+          message ||
+            'Could not extract text. If this is a scanned photo PDF, please copy-paste the text instead.',
+        );
       }
       return;
     }
@@ -315,6 +323,20 @@ export default function ControlPanel({
         maxPages: auth.maxPages,
         skipWatermark: auth.skipWatermark,
       });
+
+      // Success-only: destroy DNA / glyph buffers and reset Match preview.
+      // Does not run on failure so the user can retry export.
+      try {
+        const { destroyHandwritingSession } = await import(
+          '../../lib/handwriting/privacy'
+        );
+        destroyHandwritingSession({ scrubDom: true, invalidateRenders: true });
+        styleUploadGenRef.current += 1;
+        if (styleInputRef.current) styleInputRef.current.value = '';
+        onDnaPurgedAfterExport?.();
+      } catch (purgeErr) {
+        console.warn('[NakalAI] DNA purge after export failed:', purgeErr);
+      }
     } catch (err) {
       console.error('PDF export failed:', err);
       const message =
@@ -329,16 +351,13 @@ export default function ControlPanel({
   };
 
   const proceedToDownload = (mode: 'free' | 'paid' = 'paid') => {
-    if (mode === 'paid' && !getStudentProfile()) {
-      setShowLeadModal(true);
-      return;
-    }
     void runPdfExport({ bypassPaidCheck: true, mode });
   };
 
   /**
-   * Download initiation loop — ad-blocker probe → free 3-page cap → paid path.
-   * All rendering stays on-device (exportPdf → createObjectURL).
+   * Download initiation — unpaid users checkout for a page pack; paid users export.
+   * No free-tier download path. All rendering stays on-device.
+   * Canonical payment entry for sidebar + canvas CTAs.
    */
   const handleDownloadPdf = () => {
     if (isExporting || isProcessingPayment) return;
@@ -346,70 +365,31 @@ export default function ControlPanel({
     void (async () => {
       setClientGuardWarning(null);
 
-      // 1) Ad-blocker check at the start of the download initiation loop
-      let blocker = false;
-      try {
-        const testAd = await fetch(
-          'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
-          { method: 'HEAD', mode: 'no-cors' },
-        );
-        void testAd;
-        blocker = false;
-      } catch {
-        // Ad-blocker active — disable free download button state
-        blocker = true;
-      }
-      if (!blocker) {
-        blocker = await detectAdBlocker();
-      }
-      setAdBlockerActive(blocker);
-
-      const calculatedPages = layoutPageCount;
-
-      // 2) Unpaid paths
+      // Unpaid — require page pack checkout (Standard/Custom entry or bulk)
       if (!isPaid) {
-        // Free tier eligible (≤3 layout pages)
-        if (isWithinFreePageCap(calculatedPages)) {
-          if (blocker) {
-            setClientGuardWarning(AD_BLOCKER_FREE_DOWNLOAD_WARNING);
-            return;
-          }
-          proceedToDownload('free');
-          return;
-        }
-
-        // Free tier blocked — must upgrade to a value pack
-        setClientGuardWarning(FREE_TIER_PAGE_ALERT);
-        window.alert(FREE_TIER_PAGE_ALERT);
-
         if (!ensureTierFitsLayout()) return;
         const activation = buildActivationPayload();
-        if (!getStudentProfile()) {
-          setShowLeadModal(true);
-          return;
-        }
-        const result = await initiatePremiumCheckout(undefined, activation, text);
+        const result = await initiatePremiumCheckout(activation, text);
         if (result?.ok) {
           proceedToDownload('paid');
+        } else if (result?.checkoutSucceeded) {
+          window.alert(
+            'Payment received. Download unlock will be enabled after verification.',
+          );
         } else if (result?.error) {
           window.alert(`Payment could not complete: ${result.error}`);
         }
         return;
       }
 
-      // 3) Already paid — local full export
+      // Already paid — local full export
       proceedToDownload('paid');
     })();
   };
 
-  const handleLeadSubmit = () => {
-    setShowLeadModal(false);
-    void runPdfExport({ bypassPaidCheck: true, mode: 'paid' });
-  };
-
-  const handleLeadClose = () => {
-    setShowLeadModal(false);
-  };
+  useEffect(() => {
+    onRegisterPayAction?.(handleDownloadPdf);
+  });
 
   const handleStylePhoto = async (file: File | undefined) => {
     if (!file || !onMatchedStyleChange) return;
@@ -472,18 +452,6 @@ export default function ControlPanel({
 
   return (
     <aside className="relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-slate-900">
-      <LeadCaptureModal
-        open={showLeadModal}
-        onSubmit={handleLeadSubmit}
-        onClose={handleLeadClose}
-        hasMatchedStyle={Boolean(matchedStyle)}
-        packageId={selectedPackageId}
-        layoutPageCount={layoutPageCount}
-        assignmentText={text}
-        isPaid={isPaid}
-        onPaymentSuccess={onPaymentSuccess}
-      />
-
       {/* Processing overlay */}
       {isExporting && (
         <div
@@ -659,7 +627,7 @@ export default function ControlPanel({
           )}
         </div>
 
-        {/* Match My Writing Style */}
+        {/* Standard Handwriting + Match My Writing Style */}
         <div
           className={`mt-2 shrink-0 py-1 ${
             stackAllSections || mobileTab === 'style'
@@ -667,61 +635,90 @@ export default function ControlPanel({
               : 'hidden md:block'
           }`}
         >
-          <FieldLabel icon={ScanLine}>Match My Writing Style</FieldLabel>
-          <input
-            ref={styleInputRef}
-            type="file"
-            accept="image/*"
-            multiple={false}
-            className="hidden"
-            onChange={(e) => void handleStylePhoto(e.target.files?.[0])}
-          />
-          <button
-            type="button"
-            onClick={() => styleInputRef.current?.click()}
-            disabled={isAnalyzingStyle}
-            className="flex w-full items-center gap-2 rounded-lg border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-sky-500/10 px-3 py-2 text-left text-xs font-semibold text-amber-100 transition-all hover:border-amber-400/50 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
+          <FieldLabel icon={Type}>Standard Handwriting</FieldLabel>
+          <select
+            value={fontStyle.id}
+            disabled={Boolean(matchedStyle)}
+            onChange={(e) => {
+              const next = FONT_STYLES.find((f) => f.id === e.target.value);
+              if (next) onFontStyleChange?.(next);
+            }}
+            className={`${selectClass} disabled:cursor-not-allowed disabled:opacity-60`}
+            aria-label="Standard handwriting font"
           >
-            {isAnalyzingStyle ? (
-              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-300" />
-            ) : (
-              <ScanLine className="h-3.5 w-3.5 shrink-0 text-amber-300" />
-            )}
-            <span className="truncate">
-              {isAnalyzingStyle
-                ? 'Analyzing handwriting…'
-                : 'Match My Writing Style'}
-            </span>
-          </button>
-
+            {HANDWRITING_STYLE_BUCKETS.map((bucket) => (
+              <optgroup key={bucket.id} label={bucket.label}>
+                {FONT_STYLES.filter((f) => f.bucket === bucket.id).map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
           {matchedStyle && (
-            <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5">
-              <p className="flex min-w-0 items-center gap-2 text-[11px] text-slate-300">
-                <span
-                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/20"
-                  style={{ backgroundColor: matchedStyle.inkHex }}
-                />
-                <span className="truncate">Style matched</span>
-              </p>
-              <button
-                type="button"
-                onClick={() => onMatchedStyleChange?.(null)}
-                className="rounded-md p-0.5 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
-                aria-label="Clear matched style"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          )}
-
-          {styleError && (
-            <p
-              className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-200"
-              role="alert"
-            >
-              {styleError}
+            <p className="mt-1 text-[10px] leading-snug text-slate-500">
+              Clear Match My Writing Style to use Standard fonts again.
             </p>
           )}
+
+          <div className="mt-2">
+            <FieldLabel icon={ScanLine}>Match My Writing Style</FieldLabel>
+            <input
+              ref={styleInputRef}
+              type="file"
+              accept="image/*"
+              multiple={false}
+              className="hidden"
+              onChange={(e) => void handleStylePhoto(e.target.files?.[0])}
+            />
+            <button
+              type="button"
+              onClick={() => styleInputRef.current?.click()}
+              disabled={isAnalyzingStyle}
+              className="flex w-full items-center gap-2 rounded-lg border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-sky-500/10 px-3 py-2 text-left text-xs font-semibold text-amber-100 transition-all hover:border-amber-400/50 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isAnalyzingStyle ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-300" />
+              ) : (
+                <ScanLine className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+              )}
+              <span className="truncate">
+                {isAnalyzingStyle
+                  ? 'Analyzing handwriting…'
+                  : 'Match My Writing Style'}
+              </span>
+            </button>
+
+            {matchedStyle && (
+              <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5">
+                <p className="flex min-w-0 items-center gap-2 text-[11px] text-slate-300">
+                  <span
+                    className="inline-block h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-white/20"
+                    style={{ backgroundColor: matchedStyle.inkHex }}
+                  />
+                  <span className="truncate">Style matched</span>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onMatchedStyleChange?.(null)}
+                  className="rounded-md p-0.5 text-slate-500 hover:bg-slate-700 hover:text-slate-200"
+                  aria-label="Clear matched style"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {styleError && (
+              <p
+                className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-200"
+                role="alert"
+              >
+                {styleError}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Ink / Paper — Look tab on mobile */}
@@ -803,32 +800,26 @@ export default function ControlPanel({
                 </option>
               ))}
             </select>
-            {layoutPageCount > 10 && selectedTier.pages === 10 && (
+            {layoutPageCount > ENTRY_PACKAGE_PAGES &&
+              selectedTier.pages === ENTRY_PACKAGE_PAGES && (
               <p className="text-[10px] leading-snug text-amber-300/90">
                 Layout is {layoutPageCount} pages — pick a 75-page pack.
               </p>
             )}
           </div>
         )}
-        {(clientGuardWarning || adBlockerActive) && (
+        {clientGuardWarning && (
           <p
             className="mb-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-100"
             role="alert"
           >
-            {clientGuardWarning ??
-              (adBlockerActive ? AD_BLOCKER_FREE_DOWNLOAD_WARNING : null)}
+            {clientGuardWarning}
           </p>
         )}
         <button
           type="button"
           onClick={handleDownloadPdf}
-          disabled={
-            isExporting ||
-            isProcessingPayment ||
-            (!isPaid &&
-              isWithinFreePageCap(layoutPageCount) &&
-              adBlockerActive)
-          }
+          disabled={isExporting || isProcessingPayment}
           className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:from-sky-400 hover:to-indigo-500 hover:shadow-sky-500/40 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-60 md:text-sm"
         >
           {isProcessingPayment ? (
@@ -841,11 +832,7 @@ export default function ControlPanel({
               ? 'Processing Secure Payment...'
               : isPaid
                 ? 'Download Assignment PDF'
-                : isWithinFreePageCap(layoutPageCount)
-                  ? adBlockerActive
-                    ? 'Free download blocked · disable ad blocker'
-                    : 'Download free (≤3 pages)'
-                  : `Pay now to unlock · ₹${selectedTier.amountInr}`}
+                : `Pay now to unlock · ₹${selectedTier.amountInr}`}
           </span>
         </button>
         <p className="mt-1 text-center text-[10px] text-slate-500">
@@ -853,9 +840,7 @@ export default function ControlPanel({
             ? 'Confirming gateway · updating download permissions…'
             : isPaid
               ? checkoutQuote.paidLabel
-              : isWithinFreePageCap(layoutPageCount)
-                ? 'Client-side free PDF · Made with NakalAI footer'
-                : `${selectedTier.pages}-page ${selectedTier.engine} · ${layoutPageCount} canvas page${layoutPageCount === 1 ? '' : 's'}`}
+              : `${selectedTier.pages}-page ${selectedTier.engine} · ${layoutPageCount} canvas page${layoutPageCount === 1 ? '' : 's'}`}
         </p>
       </div>
     </aside>

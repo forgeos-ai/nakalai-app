@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { getRazorpayKeyId, getRazorpayKeySecret, isRazorpayConfigured } from './env';
+import { getRazorpayKeyId, getRazorpayKeySecret, isRazorpayConfigured } from './env.js';
 
 export { isRazorpayConfigured, getRazorpayKeyId };
 
@@ -68,7 +68,11 @@ export async function createRazorpayOrder(params: {
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
-    throw new Error(`Razorpay order creation failed (${response.status}): ${detail}`);
+    throw new Error(
+      `Razorpay order creation failed (${response.status})${
+        detail ? `: ${detail.slice(0, 200)}` : ''
+      }`,
+    );
   }
 
   return (await response.json()) as RazorpayOrder;

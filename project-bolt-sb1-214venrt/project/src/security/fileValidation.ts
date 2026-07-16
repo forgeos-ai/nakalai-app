@@ -26,8 +26,24 @@ export function assertImageSize(file: File): void {
 
 async function readHeader(file: File, length: number): Promise<Uint8Array> {
   const slice = file.slice(0, length);
-  const buffer = await slice.arrayBuffer();
-  return new Uint8Array(buffer);
+  try {
+    const buffer = await slice.arrayBuffer();
+    return new Uint8Array(buffer);
+  } catch {
+    // Older Safari FileReader fallback for Blob.slice reads
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (reader.result instanceof ArrayBuffer) {
+          resolve(new Uint8Array(reader.result));
+          return;
+        }
+        reject(new Error('Invalid PDF file.'));
+      };
+      reader.onerror = () => reject(new Error('Invalid PDF file.'));
+      reader.readAsArrayBuffer(slice);
+    });
+  }
 }
 
 export async function assertPdfMagicBytes(file: File): Promise<void> {

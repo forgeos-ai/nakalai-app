@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ControlPanel from './components/ControlPanel';
 import PaperSheet from './components/PaperSheet';
 import {
@@ -9,6 +9,7 @@ import {
   DEFAULT_TEXT,
   getFontStyleByClass,
   DEFAULT_HANDWRITING_FONT_CLASS,
+  type FontStyle,
   type InkColor,
 } from './constants';
 import {
@@ -19,18 +20,18 @@ import {
 } from './billing';
 import {
   isMockPaymentPaid,
-  toggleMockPayment,
   invalidatePaidSessionForContentChange,
 } from './paymentGateway';
-import { syncLocalPaymentStatus } from './studentProfile';
 import {
   setMatchedStyleOverrides,
   clearMatchedStyleOverrides,
   type MatchedStyleOverrides,
 } from './pageGeometry';
 import { clearJitterCache } from './jitter';
+import { DnaDebugOverlay } from '../lib/handwriting/golden-lab/dnaDebugOverlay';
 import { clearCustomStyleMap } from './utils/customStyleMap';
 import { clearHandwritingProfile } from './handwriting';
+import { clearHandwritingDNA } from '../lib/handwriting/dna/session';
 import {
   matchedFonts,
   googleFontNameForClass,
@@ -60,6 +61,13 @@ function resolvePaper(paperId?: string) {
   return PAPER_TYPES.find((p) => p.id === paperId) ?? PAPER_TYPES[0];
 }
 
+function bareFontFamily(style: FontStyle): string {
+  return (
+    style.fontFamily.replace(/["']/g, '').split(',')[0]?.trim() ||
+    googleFontNameForClass(style.id)
+  );
+}
+
 export default function App({ embedded = false, workspacePreset }: AppProps) {
   const [text, setText] = useState(
     () => workspacePreset?.text?.trim() || DEFAULT_TEXT,
@@ -71,21 +79,35 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     resolvePaper(workspacePreset?.paperId),
   );
   /**
-   * Active handwriting family — set ONLY by Match My Style image analysis
-   * (or default until the first upload).
+   * Standard Handwriting family — user-picked from FONT_STYLES.
+   * Match My Writing overrides display independently and never mutates
+   * the remembered Standard selection.
    */
   const [fontStyle, setFontStyle] = useState(() =>
     matchedFonts[DEFAULT_HANDWRITING_FONT_CLASS] ??
     getFontStyleByClass(DEFAULT_HANDWRITING_FONT_CLASS),
   );
-  /** Exact Google Fonts family from image match metadata. */
+  /** Exact face name from Standard pick or Match metadata. */
   const [activeFontFamily, setActiveFontFamily] = useState(
     () => googleFontNameForClass(DEFAULT_HANDWRITING_FONT_CLASS),
   );
+  /** Last Standard pick — restored when Match My Writing is cleared. */
+  const standardFontRef = useRef({
+    style:
+      matchedFonts[DEFAULT_HANDWRITING_FONT_CLASS] ??
+      getFontStyleByClass(DEFAULT_HANDWRITING_FONT_CLASS),
+    family: googleFontNameForClass(DEFAULT_HANDWRITING_FONT_CLASS),
+  });
   const [isPaid, setIsPaid] = useState(() => isMockPaymentPaid());
   const [matchedStyles, setMatchedStyles] = useState<MatchedStyleOverrides | null>(
     null,
   );
+  /**
+   * Billing identity for Custom vs Standard packages.
+   * Survives post-export DNA purge so entitlement package ID stays stable.
+   * Cleared only when the user explicitly clears Match My Writing.
+   */
+  const [matchBillingActive, setMatchBillingActive] = useState(false);
   /** Bumps when a new photo resolves so A4 pages remount with fresh ink/slant. */
   const [styleRevision, setStyleRevision] = useState(0);
   /** Mobile-only Edit Text / Preview Page toggle — zero desktop impact. */
@@ -101,8 +123,21 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
 
   useEffect(() => {
     setIsMounted(true);
+    try {
+      // One-time privacy cleanup for data saved by retired lead-capture builds.
+      localStorage.removeItem('nakalai_student_profile');
+      localStorage.removeItem('nakalai_local_leads_log');
+    } catch {
+      // Storage may be unavailable in privacy-restricted browsers.
+    }
     const checkMobile = () => {
-      const widthCheck = window.innerWidth < 768;
+      // Prefer visualViewport — Samsung/"Desktop site" can inflate innerWidth
+      // while the visible CSS width stays phone-sized (< 768).
+      const viewportWidth =
+        window.visualViewport?.width ??
+        document.documentElement.clientWidth ??
+        window.innerWidth;
+      const widthCheck = viewportWidth < 768;
       const agentCheck =
         /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
           navigator.userAgent,
@@ -111,7 +146,11 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     };
     checkMobile();
     window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
+    window.visualViewport?.addEventListener('resize', checkMobile);
+    return () => {
+      window.removeEventListener('resize', checkMobile);
+      window.visualViewport?.removeEventListener('resize', checkMobile);
+    };
   }, []);
 
   const layoutPageCount = useMemo(() => {
@@ -123,23 +162,23 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     resolveDefaultPackageId(false, 1),
   );
 
-  // Keep selection aligned with Match My Style + layout length; upgrade to 75 when needed.
+  // Keep selection aligned with Match billing identity + layout length; upgrade to 75 when needed.
   useEffect(() => {
     const nextId = resolveDefaultPackageId(
-      Boolean(matchedStyles),
+      matchBillingActive,
       layoutPageCount,
     );
     setSelectedPackageId((prev) => {
       const prevPkg = getPricingPackageById(prev);
       const nextPkg = getPricingPackageById(nextId);
-      if (layoutPageCount > 10 && prevPkg.pages === 10) return nextId;
+      if (layoutPageCount > prevPkg.pages && prevPkg.pages < 75) return nextId;
       if (prevPkg.engine !== nextPkg.engine && prevPkg.pages === nextPkg.pages) {
         return nextId;
       }
       if (!PRICING_PACKAGES.some((p) => p.id === prev)) return nextId;
       return prev;
     });
-  }, [matchedStyles, layoutPageCount]);
+  }, [matchBillingActive, layoutPageCount]);
 
   const selectedPackage = useMemo(
     () => getPricingPackageById(selectedPackageId),
@@ -157,13 +196,12 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
    */
   const voidPaidPassIfNeeded = useCallback(() => {
     const receipt = invalidatePaidSessionForContentChange(
-      Boolean(matchedStyles),
+      matchBillingActive,
     );
     if (!receipt) return false;
-    syncLocalPaymentStatus(false, receipt);
     setIsPaid(false);
     return true;
-  }, [matchedStyles]);
+  }, [matchBillingActive]);
 
   const handleTextChange = useCallback(
     (value: string) => {
@@ -175,13 +213,17 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     [isPaid, text, voidPaidPassIfNeeded],
   );
 
-  const handleTogglePayment = () => {
-    const { isPaid: next, receipt } = toggleMockPayment(selectedPackageId);
-    syncLocalPaymentStatus(next, receipt);
-    setIsPaid(next);
-  };
+  const payActionRef = useRef<(() => void) | null>(null);
 
-  /** Sidebar premium checkout success — unlock watermark + PDF (ledger already synced in hook). */
+  const registerPayAction = useCallback((pay: () => void) => {
+    payActionRef.current = pay;
+  }, []);
+
+  const runPayAction = useCallback(() => {
+    payActionRef.current?.();
+  }, []);
+
+  /** Premium checkout success — unlock watermark + PDF. */
   const handlePaymentSuccess = useCallback(() => {
     setIsPaid(true);
   }, []);
@@ -200,8 +242,35 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
   );
 
   /**
-   * Match My Style success — automatically binds canvas font family matrix
-   * from image analysis (fontClass → Google Font name). No manual style pick.
+   * Standard Handwriting picker — independent of Match My Writing.
+   * Choosing a Standard face clears any active Match so the two engines
+   * never share or overwrite each other's font state.
+   */
+  const handleFontStyleChange = useCallback(
+    (style: FontStyle) => {
+      const family = bareFontFamily(style);
+      standardFontRef.current = { style, family };
+      clearJitterCache();
+      if (matchedStyles) {
+        clearCustomStyleMap();
+        clearHandwritingProfile();
+        clearHandwritingDNA();
+        clearMatchedStyleOverrides();
+        setMatchedStyles(null);
+        setMatchBillingActive(false);
+        setInkColor(resolveInk(workspacePreset?.inkId));
+      }
+      setFontStyle(style);
+      setActiveFontFamily(family);
+      setStyleRevision((r) => r + 1);
+    },
+    [matchedStyles, workspacePreset?.inkId],
+  );
+
+  /**
+   * Match My Style success — binds matched face from image analysis.
+   * Does not overwrite the remembered Standard selection.
+   * Restored to RC1 lifecycle: never stash/clear profile on package changes.
    */
   const handleMatchedStyle = (style: MatchedStyleOverrides | null) => {
     clearJitterCache();
@@ -214,6 +283,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
 
       setMatchedStyleOverrides(style);
       setMatchedStyles({ ...style });
+      setMatchBillingActive(true);
       setInkColor({
         id: 'matched',
         label: 'Matched Ink',
@@ -228,17 +298,32 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     } else {
       clearCustomStyleMap();
       clearHandwritingProfile();
+      clearHandwritingDNA();
       clearMatchedStyleOverrides();
       setMatchedStyles(null);
+      setMatchBillingActive(false);
       setInkColor(resolveInk(workspacePreset?.inkId));
-      const fallback =
-        matchedFonts[DEFAULT_HANDWRITING_FONT_CLASS] ??
-        getFontStyleByClass(DEFAULT_HANDWRITING_FONT_CLASS);
-      setFontStyle(fallback);
-      setActiveFontFamily(googleFontNameForClass(DEFAULT_HANDWRITING_FONT_CLASS));
+      const { style: standardStyle, family } = standardFontRef.current;
+      setFontStyle(standardStyle);
+      setActiveFontFamily(family);
       setStyleRevision((r) => r + 1);
     }
   };
+
+  /**
+   * Post-export DNA privacy — reset preview to Standard handwriting.
+   * Does NOT clear matchBillingActive or selectedPackageId (entitlement identity).
+   * Does NOT void the paid download pass.
+   */
+  const handleDnaPurgedAfterExport = useCallback(() => {
+    clearJitterCache();
+    setMatchedStyles(null);
+    setInkColor(resolveInk(workspacePreset?.inkId));
+    const { style: standardStyle, family } = standardFontRef.current;
+    setFontStyle(standardStyle);
+    setActiveFontFamily(family);
+    setStyleRevision((r) => r + 1);
+  }, [workspacePreset?.inkId]);
 
   const sheetKey = `sheet-${styleRevision}-${activeFontFamily}-${paperType.id}-${matchedStyles?.inkHex ?? 'ink'}`;
 
@@ -251,14 +336,17 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     paperType,
     onPaperTypeChange: setPaperType,
     fontStyle,
+    onFontStyleChange: handleFontStyleChange,
     isPaid,
     matchedStyle: matchedStyles,
     onMatchedStyleChange: handleMatchedStyle,
+    onDnaPurgedAfterExport: handleDnaPurgedAfterExport,
     checkoutQuote,
     layoutPageCount,
     selectedPackageId,
     onSelectPackageId: setSelectedPackageId,
     onPaymentSuccess: handlePaymentSuccess,
+    onRegisterPayAction: registerPayAction,
   } as const;
 
   const paperSheetProps = {
@@ -268,7 +356,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
     fontStyle,
     matchedFontFamily: activeFontFamily,
     isPaid,
-    onTogglePayment: handleTogglePayment,
+    onPay: runPayAction,
     matchedStyle: matchedStyles,
     checkoutQuote,
     paintRevision: styleRevision,
@@ -330,7 +418,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
               />
             </div>
           ) : (
-            <div className="flex flex-1 w-full flex-col items-center overflow-x-hidden overflow-y-auto p-4">
+            <div className="flex w-full flex-1 flex-col items-stretch overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-3">
               <PaperSheet
                 key={`${sheetKey}-mobile`}
                 {...paperSheetProps}
@@ -350,6 +438,7 @@ export default function App({ embedded = false, workspacePreset }: AppProps) {
           </div>
         </div>
       )}
+      <DnaDebugOverlay />
     </div>
   );
 }

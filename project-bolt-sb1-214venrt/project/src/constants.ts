@@ -218,11 +218,11 @@ export const FONT_STYLES: FontStyle[] = [
     id: 'casual-print',
     label: 'Casual Print',
     className: 'font-casual-print',
-    fontFamily: '"Playpen Sans", sans-serif',
+    fontFamily: '"Architects Daughter", cursive',
     bucket: 'printed-block-caps',
     layout: layoutFor('printed-block-caps', {
       strokeWeight: 1.35,
-      trackingEm: 0.05,
+      trackingEm: 0.022,
     }),
   },
   {
@@ -280,7 +280,7 @@ export const FONT_STYLES: FontStyle[] = [
 ];
 
 export const DEFAULT_HANDWRITING_FONT_CLASS: HandwritingFontClass =
-  'cursive-neat';
+  'casual-print';
 
 /** Sentinel id / label for Match My Style proxy profile. */
 export const MATCHED_CUSTOM_STYLE_ID = 'matched-custom-upload' as const;

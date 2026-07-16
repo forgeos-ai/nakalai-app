@@ -2,14 +2,17 @@
  * Zero-cost client boundaries — never ship rendering / export work to a server.
  */
 
-/** Free-tier structural page cap (layout matrix length). */
-export const FREE_PAGE_CAP = 3 as const;
+/**
+ * No free download tier (founder rule).
+ * Kept at 0 so any residual `mode: 'free'` path cannot grant pages.
+ */
+export const FREE_PAGE_CAP = 0 as const;
 
 export const FREE_TIER_PAGE_ALERT =
-  'Free tier downloads are capped at 3 pages maximum. Upgrade to our value tiers to download your full assignment instantly!';
+  'Downloads require a page pack. Standard starts at ₹19 for up to 5 pages; Match My Style starts at ₹49 for up to 5 pages.';
 
 export const AD_BLOCKER_FREE_DOWNLOAD_WARNING =
-  'Ad blocker detected. Free downloads are disabled while an ad blocker is active. Pause your ad blocker to use the free ≤3-page download, or upgrade to a paid page bundle.';
+  'Ad blocker detected. Free downloads are not available. Use a paid page pack to download your assignment.';
 
 const ADSENSE_PROBE =
   'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js';
@@ -37,6 +40,7 @@ export async function detectAdBlocker(): Promise<boolean> {
   }
 }
 
-export function isWithinFreePageCap(calculatedPages: number): boolean {
-  return calculatedPages <= FREE_PAGE_CAP;
+/** Always false — there is no free page allowance. */
+export function isWithinFreePageCap(_calculatedPages: number): boolean {
+  return false;
 }

@@ -4,7 +4,7 @@
 
 import { getPricingPackageById, type PricingPackage } from '../../src/billing';
 
-export const FREE_PAGE_CAP = 3 as const;
+export const FREE_PAGE_CAP = 0 as const;
 
 export function resolvePackage(packageId: string | null | undefined): PricingPackage {
   return getPricingPackageById(packageId);
